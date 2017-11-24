@@ -5,6 +5,7 @@
 # See README for more details.
 
 import hostapd
+from utils import skip_with_fips
 
 def test_hapd_ctrl_status(dev, apdev):
     """hostapd ctrl_iface STATUS commands"""
@@ -393,9 +394,9 @@ def test_hapd_ctrl_set_error_cases(dev, apdev):
                "local_pwr_constraint -1",
                "local_pwr_constraint 256",
                "wmm_ac_bk_cwmin -1",
-               "wmm_ac_be_cwmin 13",
+               "wmm_ac_be_cwmin 16",
                "wmm_ac_vi_cwmax -1",
-               "wmm_ac_vo_cwmax 13",
+               "wmm_ac_vo_cwmax 16",
                "wmm_ac_foo_cwmax 6",
                "wmm_ac_bk_aifs 0",
                "wmm_ac_bk_aifs 256",
@@ -435,3 +436,122 @@ def test_hapd_ctrl_set_error_cases(dev, apdev):
     for e in no_err:
         if "OK" not in hapd.request("SET " + e):
             raise Exception("Unexpected SET failure: '%s'" % e)
+
+def test_hapd_ctrl_global(dev, apdev):
+    """hostapd and GET ctrl_iface command"""
+    ssid = "hapd-ctrl"
+    params = { "ssid": ssid }
+    ifname = apdev[0]['ifname']
+    hapd = hostapd.add_ap(ifname, params)
+    hapd_global = hostapd.HostapdGlobal()
+    res = hapd_global.request("IFNAME=" + ifname + " PING")
+    if "PONG" not in res:
+            raise Exception("Could not ping hostapd interface " + ifname + " via global control interface")
+    res = hapd_global.request("IFNAME=" + ifname + " GET version")
+    if "FAIL" in res:
+           raise Exception("Could not get hostapd version for " + ifname + " via global control interface")
+
+def dup_network(hapd_global, src, dst, param):
+    res = hapd_global.request("DUP_NETWORK %s %s %s" % (src, dst, param))
+    if "OK" not in res:
+        raise Exception("Could not dup %s param from %s to %s" % (param, src,
+                                                                  dst))
+
+def test_hapd_dup_network_global_wpa2(dev, apdev):
+    """hostapd and DUP_NETWORK command (WPA2"""
+    passphrase="12345678"
+    src_ssid = "hapd-ctrl-src"
+    dst_ssid = "hapd-ctrl-dst"
+
+    src_params = hostapd.wpa2_params(ssid=src_ssid, passphrase=passphrase)
+    src_ifname = apdev[0]['ifname']
+    src_hapd = hostapd.add_ap(src_ifname, src_params)
+
+    dst_params = { "ssid": dst_ssid }
+    dst_ifname = apdev[1]['ifname']
+    dst_hapd = hostapd.add_ap(dst_ifname, dst_params, no_enable=True)
+
+    hapd_global = hostapd.HostapdGlobal()
+
+    for param in [ "wpa", "wpa_passphrase", "wpa_key_mgmt", "rsn_pairwise" ]:
+        dup_network(hapd_global, src_ifname, dst_ifname, param)
+
+    dst_hapd.enable()
+
+    dev[0].connect(dst_ssid, psk=passphrase, proto="RSN", pairwise="CCMP",
+                   scan_freq="2412")
+    addr = dev[0].own_addr()
+    if "FAIL" in dst_hapd.request("STA " + addr):
+            raise Exception("Could not connect using duplicated wpa params")
+
+def test_hapd_dup_network_global_wpa(dev, apdev):
+    """hostapd and DUP_NETWORK command (WPA)"""
+    skip_with_fips(dev[0])
+    psk = '602e323e077bc63bd80307ef4745b754b0ae0a925c2638ecd13a794b9527b9e6'
+    src_ssid = "hapd-ctrl-src"
+    dst_ssid = "hapd-ctrl-dst"
+
+    src_params = hostapd.wpa_params(ssid=src_ssid)
+    src_params['wpa_psk'] = psk
+    src_ifname = apdev[0]['ifname']
+    src_hapd = hostapd.add_ap(src_ifname, src_params)
+
+    dst_params = { "ssid": dst_ssid }
+    dst_ifname = apdev[1]['ifname']
+    dst_hapd = hostapd.add_ap(dst_ifname, dst_params, no_enable=True)
+
+    hapd_global = hostapd.HostapdGlobal()
+
+    for param in [ "wpa", "wpa_psk", "wpa_key_mgmt", "wpa_pairwise" ]:
+        dup_network(hapd_global, src_ifname, dst_ifname, param)
+
+    dst_hapd.enable()
+
+    dev[0].connect(dst_ssid, raw_psk=psk, proto="WPA", pairwise="TKIP",
+                   scan_freq="2412")
+    addr = dev[0].own_addr()
+    if "FAIL" in dst_hapd.request("STA " + addr):
+            raise Exception("Could not connect using duplicated wpa params")
+
+def test_hapd_ctrl_log_level(dev, apdev):
+    """hostapd ctrl_iface LOG_LEVEL"""
+    hapd = hostapd.add_ap(apdev[0]['ifname'], { "ssid": "open" })
+    level = hapd.request("LOG_LEVEL")
+    if "Current level: MSGDUMP" not in level:
+        raise Exception("Unexpected debug level(1): " + level)
+    if "Timestamp: 1" not in level:
+        raise Exception("Unexpected timestamp(1): " + level)
+
+    if "OK" not in hapd.request("LOG_LEVEL  MSGDUMP  0"):
+        raise Exception("LOG_LEVEL failed")
+    level = hapd.request("LOG_LEVEL")
+    if "Current level: MSGDUMP" not in level:
+        raise Exception("Unexpected debug level(2): " + level)
+    if "Timestamp: 0" not in level:
+        raise Exception("Unexpected timestamp(2): " + level)
+
+    if "OK" not in hapd.request("LOG_LEVEL  MSGDUMP  1"):
+        raise Exception("LOG_LEVEL failed")
+    level = hapd.request("LOG_LEVEL")
+    if "Current level: MSGDUMP" not in level:
+        raise Exception("Unexpected debug level(3): " + level)
+    if "Timestamp: 1" not in level:
+        raise Exception("Unexpected timestamp(3): " + level)
+
+    if "FAIL" not in hapd.request("LOG_LEVEL FOO"):
+        raise Exception("Invalid LOG_LEVEL accepted")
+
+    for lev in [ "EXCESSIVE", "MSGDUMP", "DEBUG", "INFO", "WARNING", "ERROR" ]:
+        if "OK" not in hapd.request("LOG_LEVEL " + lev):
+            raise Exception("LOG_LEVEL failed for " + lev)
+        level = hapd.request("LOG_LEVEL")
+        if "Current level: " + lev not in level:
+            raise Exception("Unexpected debug level: " + level)
+
+    if "OK" not in hapd.request("LOG_LEVEL  MSGDUMP  1"):
+        raise Exception("LOG_LEVEL failed")
+    level = hapd.request("LOG_LEVEL")
+    if "Current level: MSGDUMP" not in level:
+        raise Exception("Unexpected debug level(3): " + level)
+    if "Timestamp: 1" not in level:
+        raise Exception("Unexpected timestamp(3): " + level)

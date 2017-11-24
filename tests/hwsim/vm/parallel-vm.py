@@ -62,7 +62,15 @@ long_tests = [ "ap_roam_open",
                "dbus_connect_oom",
                "proxyarp_open",
                "ap_wps_iteration",
-               "ap_wps_pbc_timeout" ]
+               "ap_wps_iteration_error",
+               "ap_wps_pbc_timeout",
+               "ap_wps_http_timeout",
+               "p2p_go_move_reg_change",
+               "p2p_go_move_active",
+               "p2p_go_move_scm",
+               "p2p_go_move_scm_peer_supports",
+               "p2p_go_move_scm_peer_does_not_support",
+               "p2p_go_move_scm_multi" ]
 
 def get_failed(vm):
     failed = []
@@ -97,7 +105,12 @@ def vm_read_stdout(vm, i):
         elif line.startswith("FAIL"):
             ready = True
             total_failed += 1
-            name = line.split(' ')[1]
+            vals = line.split(' ')
+            if len(vals) < 2:
+                logger.info("VM[%d] incomplete FAIL line: %s" % (i, line))
+                name = line
+            else:
+                name = vals[1]
             logger.debug("VM[%d] test case failed: %s" % (i, name))
             vm['failed'].append(name)
         elif line.startswith("NOT-FOUND"):
@@ -109,6 +122,10 @@ def vm_read_stdout(vm, i):
             total_skipped += 1
         elif line.startswith("START"):
             total_started += 1
+            if len(vm['failed']) == 0:
+                vals = line.split(' ')
+                if len(vals) >= 2:
+                    vm['fail_seq'].append(vals[1])
         vm['out'] += line + '\n'
         lines.append(line)
     vm['pending'] = pending
@@ -420,6 +437,7 @@ def main():
         vm[i]['pending'] = ""
         vm[i]['err'] = ""
         vm[i]['failed'] = []
+        vm[i]['fail_seq'] = []
         for stream in [ vm[i]['proc'].stdout, vm[i]['proc'].stderr ]:
             fd = stream.fileno()
             fl = fcntl.fcntl(fd, fcntl.F_GETFL)
@@ -435,6 +453,19 @@ def main():
     failed = get_failed(vm)
 
     if first_run_failures:
+        print "To re-run same failure sequence(s):"
+        for i in range(0, num_servers):
+            if len(vm[i]['failed']) == 0:
+                continue
+            print "./parallel-vm.py -1 1",
+            skip = len(vm[i]['fail_seq'])
+            skip -= min(skip, 30)
+            for t in vm[i]['fail_seq']:
+                if skip > 0:
+                    skip -= 1
+                    continue
+                print t,
+            print
         print "Failed test cases:"
         for f in first_run_failures:
             print f,

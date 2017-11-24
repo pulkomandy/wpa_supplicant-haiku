@@ -1,5 +1,5 @@
 # EAP protocol tests
-# Copyright (c) 2014, Jouni Malinen <j@w1.fi>
+# Copyright (c) 2014-2015, Jouni Malinen <j@w1.fi>
 #
 # This software may be distributed under the terms of the BSD license.
 # See README for more details.
@@ -14,6 +14,7 @@ import time
 
 import hostapd
 from utils import HwsimSkip
+from test_ap_eap import check_eap_capa
 
 EAP_CODE_REQUEST = 1
 EAP_CODE_RESPONSE = 2
@@ -141,6 +142,7 @@ def start_ap(ifname):
 
 def test_eap_proto(dev, apdev):
     """EAP protocol tests"""
+    check_eap_capa(dev[0], "MD5")
     def eap_handler(ctx, req):
         logger.info("eap_handler - RX " + req.encode("hex"))
         if 'num' not in ctx:
@@ -556,6 +558,7 @@ def test_eap_proto_sake(dev, apdev):
 
 def test_eap_proto_leap(dev, apdev):
     """EAP-LEAP protocol tests"""
+    check_eap_capa(dev[0], "LEAP")
     def leap_handler(ctx, req):
         logger.info("leap_handler - RX " + req.encode("hex"))
         if 'num' not in ctx:
@@ -722,6 +725,8 @@ def test_eap_proto_leap(dev, apdev):
 
 def test_eap_proto_md5(dev, apdev):
     """EAP-MD5 protocol tests"""
+    check_eap_capa(dev[0], "MD5")
+
     def md5_handler(ctx, req):
         logger.info("md5_handler - RX " + req.encode("hex"))
         if 'num' not in ctx:
@@ -2123,9 +2128,9 @@ def test_eap_proto_aka(dev, apdev):
         idx += 1
         if ctx['num'] == idx:
             logger.info("Test: Unknown subtype")
-            return struct.pack(">BBHBB", EAP_CODE_REQUEST, ctx['id'],
-                               4 + 1 + 1,
-                               EAP_TYPE_AKA, 255)
+            return struct.pack(">BBHBBH", EAP_CODE_REQUEST, ctx['id'],
+                               4 + 1 + 3,
+                               EAP_TYPE_AKA, 255, 0)
         idx += 1
         if ctx['num'] == idx:
             logger.info("Test: EAP-Failure")
@@ -2134,9 +2139,9 @@ def test_eap_proto_aka(dev, apdev):
         idx += 1
         if ctx['num'] == idx:
             logger.info("Test: Client Error")
-            return struct.pack(">BBHBB", EAP_CODE_REQUEST, ctx['id'],
-                               4 + 1 + 1,
-                               EAP_TYPE_AKA, EAP_AKA_SUBTYPE_CLIENT_ERROR)
+            return struct.pack(">BBHBBH", EAP_CODE_REQUEST, ctx['id'],
+                               4 + 1 + 3,
+                               EAP_TYPE_AKA, EAP_AKA_SUBTYPE_CLIENT_ERROR, 0)
         idx += 1
         if ctx['num'] == idx:
             logger.info("Test: EAP-Failure")
@@ -2791,6 +2796,7 @@ def test_eap_proto_aka(dev, apdev):
                 if ev is None:
                     raise Exception("Timeout on EAP failure")
             dev[0].request("REMOVE_NETWORK all")
+            dev[0].dump_monitor()
     finally:
         stop_radius_server(srv)
 
@@ -3135,6 +3141,7 @@ def test_eap_proto_aka_prime(dev, apdev):
                 if ev is None:
                     raise Exception("Timeout on EAP failure")
             dev[0].request("REMOVE_NETWORK all")
+            dev[0].dump_monitor()
     finally:
         stop_radius_server(srv)
 
@@ -3496,9 +3503,9 @@ def test_eap_proto_sim(dev, apdev):
         idx += 1
         if ctx['num'] == idx:
             logger.info("Test: Client Error")
-            return struct.pack(">BBHBB", EAP_CODE_REQUEST, ctx['id'],
-                               4 + 1 + 1,
-                               EAP_TYPE_SIM, EAP_SIM_SUBTYPE_CLIENT_ERROR)
+            return struct.pack(">BBHBBH", EAP_CODE_REQUEST, ctx['id'],
+                               4 + 1 + 3,
+                               EAP_TYPE_SIM, EAP_SIM_SUBTYPE_CLIENT_ERROR, 0)
         idx += 1
         if ctx['num'] == idx:
             logger.info("Test: EAP-Failure")
@@ -3507,9 +3514,9 @@ def test_eap_proto_sim(dev, apdev):
         idx += 1
         if ctx['num'] == idx:
             logger.info("Test: Unknown subtype")
-            return struct.pack(">BBHBB", EAP_CODE_REQUEST, ctx['id'],
-                               4 + 1 + 1,
-                               EAP_TYPE_SIM, 255)
+            return struct.pack(">BBHBBH", EAP_CODE_REQUEST, ctx['id'],
+                               4 + 1 + 3,
+                               EAP_TYPE_SIM, 255, 0)
         idx += 1
         if ctx['num'] == idx:
             logger.info("Test: EAP-Failure")
@@ -3539,11 +3546,13 @@ def test_eap_proto_sim(dev, apdev):
                 if ev is None:
                     raise Exception("Timeout on EAP failure")
             dev[0].request("REMOVE_NETWORK all")
+            dev[0].dump_monitor()
     finally:
         stop_radius_server(srv)
 
 def test_eap_proto_ikev2(dev, apdev):
     """EAP-IKEv2 protocol tests"""
+    check_eap_capa(dev[0], "IKEV2")
     def ikev2_handler(ctx, req):
         logger.info("ikev2_handler - RX " + req.encode("hex"))
         if 'num' not in ctx:

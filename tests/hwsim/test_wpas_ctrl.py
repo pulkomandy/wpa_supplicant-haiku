@@ -6,10 +6,14 @@
 
 import logging
 logger = logging.getLogger()
+import os
+import socket
 import subprocess
 import time
 
 import hostapd
+import hwsim_utils
+from hwsim import HWSimRadio
 from wpasupplicant import WpaSupplicant
 from utils import alloc_fail
 
@@ -30,7 +34,7 @@ def test_wpas_ctrl_network(dev):
 
     tests = (("key_mgmt", "WPA-PSK WPA-EAP IEEE8021X NONE WPA-NONE FT-PSK FT-EAP WPA-PSK-SHA256 WPA-EAP-SHA256"),
              ("pairwise", "CCMP-256 GCMP-256 CCMP GCMP TKIP"),
-             ("group", "CCMP-256 GCMP-256 CCMP GCMP TKIP WEP104 WEP40"),
+             ("group", "CCMP-256 GCMP-256 CCMP GCMP TKIP"),
              ("auth_alg", "OPEN SHARED LEAP"),
              ("scan_freq", "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15"),
              ("freq_list", "2412 2417"),
@@ -228,6 +232,19 @@ def test_wpas_ctrl_network(dev):
         if "FAIL" not in dev[0].request("SET_NETWORK %d bssid_blacklist %s" % (id, val)):
             raise Exception("Invalid bssid_blacklist value accepted")
 
+def test_wpas_ctrl_network_oom(dev):
+    """wpa_supplicant ctrl_iface network OOM in string parsing"""
+    id = dev[0].add_network()
+
+    tests = [ ('"foo"', 1, 'dup_binstr;wpa_config_set'),
+              ('P"foo"', 1, 'dup_binstr;wpa_config_set'),
+              ('P"foo"', 2, 'wpa_config_set'),
+              ('112233', 1, 'wpa_config_set') ]
+    for val,count,func in tests:
+        with alloc_fail(dev[0], count, func):
+            if "FAIL" not in dev[0].request("SET_NETWORK " + str(id) + ' ssid ' + val):
+                raise Exception("Unexpected success for SET_NETWORK during OOM")
+
 def test_wpas_ctrl_many_networks(dev, apdev):
     """wpa_supplicant ctrl_iface LIST_NETWORKS with huge number of networks"""
     for i in range(1000):
@@ -274,6 +291,37 @@ def test_wpas_ctrl_dup_network(dev, apdev):
         raise Exception("Unexpected DUP_NETWORK success")
     dev[0].request("DISCONNECT")
     if "OK" not in dev[0].request("DUP_NETWORK %d %d ssid" % (id, id)):
+        raise Exception("Unexpected DUP_NETWORK failure")
+
+def test_wpas_ctrl_dup_network_global(dev, apdev):
+    """wpa_supplicant ctrl_iface DUP_NETWORK (global)"""
+    ssid = "target"
+    passphrase = 'qwertyuiop'
+    params = hostapd.wpa2_params(ssid=ssid, passphrase=passphrase)
+    hostapd.add_ap(apdev[0]['ifname'], params)
+
+    src = dev[0].connect("another", psk=passphrase, scan_freq="2412",
+                         only_add_network=True)
+    id = dev[0].add_network()
+    dev[0].set_network_quoted(id, "ssid", ssid)
+    for f in [ "key_mgmt", "psk", "scan_freq" ]:
+        res = dev[0].global_request("DUP_NETWORK {} {} {} {} {}".format(dev[0].ifname, dev[0].ifname, src, id, f))
+        if "OK" not in res:
+            raise Exception("DUP_NETWORK failed")
+    dev[0].connect_network(id)
+
+    if "FAIL" not in dev[0].global_request("DUP_NETWORK "):
+        raise Exception("Unexpected DUP_NETWORK success")
+    if "FAIL" not in dev[0].global_request("DUP_NETWORK %s" % dev[0].ifname):
+        raise Exception("Unexpected DUP_NETWORK success")
+    if "FAIL" not in dev[0].global_request("DUP_NETWORK %s %s" % (dev[0].ifname, dev[0].ifname)):
+        raise Exception("Unexpected DUP_NETWORK success")
+    if "FAIL" not in dev[0].global_request("DUP_NETWORK %s %s %d" % (dev[0].ifname, dev[0].ifname, id)):
+        raise Exception("Unexpected DUP_NETWORK success")
+    if "FAIL" not in dev[0].global_request("DUP_NETWORK %s %s %d %d" % (dev[0].ifname, dev[0].ifname, id, id)):
+        raise Exception("Unexpected DUP_NETWORK success")
+    dev[0].request("DISCONNECT")
+    if "OK" not in dev[0].global_request("DUP_NETWORK %s %s %d %d ssid" % (dev[0].ifname, dev[0].ifname, id, id)):
         raise Exception("Unexpected DUP_NETWORK failure")
 
 def add_cred(dev):
@@ -637,6 +685,19 @@ def test_wpas_ctrl_set_wps_params(dev):
     for t in ts:
         if "OK" not in dev[2].request("SET " + t):
             raise Exception("SET failed for: " + t)
+
+    ts = [ "uuid 12345678+9abc-def0-1234-56789abcdef0",
+           "uuid 12345678-qabc-def0-1234-56789abcdef0",
+           "uuid 12345678-9abc+def0-1234-56789abcdef0",
+           "uuid 12345678-9abc-qef0-1234-56789abcdef0",
+           "uuid 12345678-9abc-def0+1234-56789abcdef0",
+           "uuid 12345678-9abc-def0-q234-56789abcdef0",
+           "uuid 12345678-9abc-def0-1234+56789abcdef0",
+           "uuid 12345678-9abc-def0-1234-q6789abcdef0",
+           "uuid qwerty" ]
+    for t in ts:
+        if "FAIL" not in dev[2].request("SET " + t):
+            raise Exception("SET succeeded for: " + t)
 
 def test_wpas_ctrl_level(dev):
     """wpa_supplicant ctrl_iface LEVEL"""
@@ -1016,7 +1077,7 @@ def test_wpas_ctrl_country(dev, apdev):
             raise Exception("Failed to set country code")
         if dev[0].request("GET country") != "FI":
             raise Exception("Country code set failed")
-        ev = dev[0].wait_event(["CTRL-EVENT-REGDOM-CHANGE"])
+        ev = dev[0].wait_global_event(["CTRL-EVENT-REGDOM-CHANGE"], 10)
         if ev is None:
             raise Exception("regdom change event not seen")
         if "init=USER type=COUNTRY alpha2=FI" not in ev:
@@ -1024,7 +1085,7 @@ def test_wpas_ctrl_country(dev, apdev):
         dev[0].request("SET country 00")
         if dev[0].request("GET country") != "00":
             raise Exception("Country code set failed")
-        ev = dev[0].wait_event(["CTRL-EVENT-REGDOM-CHANGE"])
+        ev = dev[0].wait_global_event(["CTRL-EVENT-REGDOM-CHANGE"], 10)
         if ev is None:
             raise Exception("regdom change event not seen")
         if "init=CORE type=WORLD" not in ev:
@@ -1347,3 +1408,352 @@ def test_wpas_ctrl_dump(dev, apdev):
             raise Exception("Mismatch in config field " + field)
     if "beacon_int" not in vals:
         raise Exception("Missing config field")
+
+def test_wpas_ctrl_interface_add(dev, apdev):
+    """wpa_supplicant INTERFACE_ADD/REMOVE with vif creation/removal"""
+    hapd = hostapd.add_ap(apdev[0]['ifname'], { "ssid": "open" })
+    dev[0].connect("open", key_mgmt="NONE", scan_freq="2412")
+    hwsim_utils.test_connectivity(dev[0], hapd)
+
+    ifname = "test-" + dev[0].ifname
+    dev[0].interface_add(ifname, create=True)
+    wpas = WpaSupplicant(ifname=ifname)
+    wpas.connect("open", key_mgmt="NONE", scan_freq="2412")
+    hwsim_utils.test_connectivity(wpas, hapd)
+    hwsim_utils.test_connectivity(dev[0], hapd)
+    dev[0].global_request("INTERFACE_REMOVE " + ifname)
+    hwsim_utils.test_connectivity(dev[0], hapd)
+
+def test_wpas_ctrl_interface_add_many(dev, apdev):
+    """wpa_supplicant INTERFACE_ADD/REMOVE with vif creation/removal (many)"""
+    try:
+        _test_wpas_ctrl_interface_add_many(dev, apdev)
+    finally:
+        for i in range(10):
+            ifname = "test%d-" % i + dev[0].ifname
+            dev[0].global_request("INTERFACE_REMOVE " + ifname)
+
+def _test_wpas_ctrl_interface_add_many(dev, apdev):
+    hapd = hostapd.add_ap(apdev[0]['ifname'], { "ssid": "open" })
+    dev[0].connect("open", key_mgmt="NONE", scan_freq="2412")
+    hwsim_utils.test_connectivity(dev[0], hapd)
+
+    l = []
+    for i in range(10):
+        ifname = "test%d-" % i + dev[0].ifname
+        dev[0].interface_add(ifname, create=True)
+        wpas = WpaSupplicant(ifname=ifname)
+        wpas.connect("open", key_mgmt="NONE", scan_freq="2412")
+        l.append(wpas)
+    for wpas in l:
+        hwsim_utils.test_connectivity(wpas, hapd)
+
+def test_wpas_ctrl_interface_add2(dev, apdev):
+    """wpa_supplicant INTERFACE_ADD/REMOVE with vif without creation/removal"""
+    ifname = "test-ext-" + dev[0].ifname
+    try:
+        _test_wpas_ctrl_interface_add2(dev, apdev, ifname)
+    finally:
+        subprocess.call(['iw', 'dev', ifname, 'del'])
+
+def _test_wpas_ctrl_interface_add2(dev, apdev, ifname):
+    hapd = hostapd.add_ap(apdev[0]['ifname'], { "ssid": "open" })
+    dev[0].connect("open", key_mgmt="NONE", scan_freq="2412")
+    hwsim_utils.test_connectivity(dev[0], hapd)
+
+    subprocess.call(['iw', 'dev', dev[0].ifname, 'interface', 'add', ifname,
+                     'type', 'station'])
+    dev[0].interface_add(ifname, set_ifname=False, all_params=True)
+    wpas = WpaSupplicant(ifname=ifname)
+    wpas.connect("open", key_mgmt="NONE", scan_freq="2412")
+    hwsim_utils.test_connectivity(wpas, hapd)
+    hwsim_utils.test_connectivity(dev[0], hapd)
+    del wpas
+    dev[0].global_request("INTERFACE_REMOVE " + ifname)
+    hwsim_utils.test_connectivity(dev[0], hapd)
+
+def test_wpas_ctrl_wait(dev, apdev, test_params):
+    """wpa_supplicant control interface wait for client"""
+    logfile = os.path.join(test_params['logdir'], 'wpas_ctrl_wait.log-wpas')
+    pidfile = os.path.join(test_params['logdir'], 'wpas_ctrl_wait.pid-wpas')
+    conffile = os.path.join(test_params['logdir'], 'wpas_ctrl_wait.conf')
+    with open(conffile, 'w') as f:
+        f.write("ctrl_interface=DIR=/var/run/wpa_supplicant\n")
+
+    prg = os.path.join(test_params['logdir'],
+                       'alt-wpa_supplicant/wpa_supplicant/wpa_supplicant')
+    if not os.path.exists(prg):
+        prg = '../../wpa_supplicant/wpa_supplicant'
+    arg = [ prg ]
+    cmd = subprocess.Popen(arg, stdout=subprocess.PIPE)
+    out = cmd.communicate()[0]
+    cmd.wait()
+    tracing = "Linux tracing" in out
+
+    with HWSimRadio() as (radio, iface):
+        arg = [ prg, '-BdddW', '-P', pidfile, '-f', logfile,
+                '-Dnl80211', '-c', conffile, '-i', iface ]
+        if tracing:
+            arg += [ '-T' ]
+        logger.info("Start wpa_supplicant: " + str(arg))
+        subprocess.call(arg)
+        wpas = WpaSupplicant(ifname=iface)
+        if "PONG" not in wpas.request("PING"):
+            raise Exception("Could not PING wpa_supplicant")
+        if not os.path.exists(pidfile):
+            raise Exception("PID file not created")
+        if "OK" not in wpas.request("TERMINATE"):
+            raise Exception("Could not TERMINATE")
+        ev = wpas.wait_event([ "CTRL-EVENT-TERMINATING" ], timeout=2)
+        if ev is None:
+            raise Exception("No termination event received")
+        for i in range(20):
+            if not os.path.exists(pidfile):
+                break
+            time.sleep(0.1)
+        if os.path.exists(pidfile):
+            raise Exception("PID file not removed")
+
+def test_wpas_ctrl_oom(dev):
+    """Various wpa_supplicant ctrl_iface OOM cases"""
+    try:
+        _test_wpas_ctrl_oom(dev)
+    finally:
+        dev[0].request("VENDOR_ELEM_REMOVE 1 *")
+        dev[0].request("VENDOR_ELEM_REMOVE 2 *")
+        dev[0].request("SET bssid_filter ")
+
+def _test_wpas_ctrl_oom(dev):
+    dev[0].request('VENDOR_ELEM_ADD 2 000100')
+    tests = [ ('DRIVER_EVENT AVOID_FREQUENCIES 2412', 'FAIL',
+               1, 'freq_range_list_parse'),
+              ('P2P_SET disallow_freq 2412', 'FAIL',
+               1, 'freq_range_list_parse'),
+              ('SCAN freq=2412', 'FAIL',
+               1, 'freq_range_list_parse'),
+              ('INTERWORKING_SELECT freq=2412', 'FAIL',
+               1, 'freq_range_list_parse'),
+              ('SCAN ssid 112233', 'FAIL',
+               1, 'wpas_ctrl_scan'),
+              ('MGMT_TX 00:00:00:00:00:00 00:00:00:00:00:00 action=00', 'FAIL',
+               1, 'wpas_ctrl_iface_mgmt_tx'),
+              ('EAPOL_RX 00:00:00:00:00:00 00', 'FAIL',
+               1, 'wpas_ctrl_iface_eapol_rx'),
+              ('DATA_TEST_FRAME 00112233445566778899aabbccddee', 'FAIL',
+               1, 'wpas_ctrl_iface_data_test_frame'),
+              ('DATA_TEST_FRAME 00112233445566778899aabbccddee', 'FAIL',
+               1, 'l2_packet_init;wpas_ctrl_iface_data_test_frame'),
+              ('VENDOR_ELEM_ADD 1 000100', 'FAIL',
+               1, 'wpas_ctrl_vendor_elem_add'),
+              ('VENDOR_ELEM_ADD 2 000100', 'FAIL',
+               2, 'wpas_ctrl_vendor_elem_add'),
+              ('VENDOR_ELEM_REMOVE 2 000100', 'FAIL',
+               1, 'wpas_ctrl_vendor_elem_remove'),
+              ('SET bssid_filter 00:11:22:33:44:55', 'FAIL',
+               1, 'set_bssid_filter'),
+              ('SET disallow_aps bssid 00:11:22:33:44:55', 'FAIL',
+               1, 'set_disallow_aps'),
+              ('SET disallow_aps ssid 11', 'FAIL',
+               1, 'set_disallow_aps'),
+              ('SET blob foo 0011', 'FAIL',
+               1, 'wpas_ctrl_set_blob'),
+              ('SET blob foo 0011', 'FAIL',
+               2, 'wpas_ctrl_set_blob'),
+              ('SET blob foo 0011', 'FAIL',
+               3, 'wpas_ctrl_set_blob'),
+              ('WPS_NFC_TAG_READ 00', 'FAIL',
+               1, 'wpa_supplicant_ctrl_iface_wps_nfc_tag_read'),
+              ('WPS_NFC_TOKEN NDEF', 'FAIL',
+               1, 'wpa_supplicant_ctrl_iface_wps_nfc_token'),
+              ('WPS_NFC_TOKEN NDEF', 'FAIL',
+               2, 'wpa_supplicant_ctrl_iface_wps_nfc_token'),
+              ('WPS_NFC_TOKEN NDEF', 'FAIL',
+               3, 'wpa_supplicant_ctrl_iface_wps_nfc_token'),
+              ('WPS_NFC_TOKEN NDEF', 'FAIL',
+               4, 'wpa_supplicant_ctrl_iface_wps_nfc_token'),
+              ('WPS_NFC_TOKEN NDEF', 'FAIL',
+               5, 'wpa_supplicant_ctrl_iface_wps_nfc_token'),
+              ('NFC_REPORT_HANDOVER ROLE TYPE 00 00', 'FAIL',
+               1, 'wpas_ctrl_nfc_report_handover'),
+              ('NFC_REPORT_HANDOVER ROLE TYPE 00 00', 'FAIL',
+               2, 'wpas_ctrl_nfc_report_handover'),
+              ('NFC_GET_HANDOVER_REQ NDEF WPS-CR', 'FAIL',
+               1, 'wps_build_nfc_handover_req'),
+              ('NFC_GET_HANDOVER_REQ NDEF WPS-CR', 'FAIL',
+               1, 'ndef_build_record'),
+              ('NFC_GET_HANDOVER_REQ NDEF P2P-CR', None,
+               1, 'wpas_p2p_nfc_handover'),
+              ('NFC_GET_HANDOVER_REQ NDEF P2P-CR', 'FAIL',
+               2, 'wpas_p2p_nfc_handover'),
+              ('NFC_GET_HANDOVER_REQ NDEF P2P-CR', None,
+               1, 'wps_build_nfc_handover_req_p2p'),
+              ('NFC_GET_HANDOVER_REQ NDEF P2P-CR', 'FAIL',
+               1, 'ndef_build_record'),
+              ('NFC_GET_HANDOVER_SEL NDEF P2P-CR-TAG', None,
+               1, 'wpas_ctrl_nfc_get_handover_sel_p2p'),
+              ('NFC_GET_HANDOVER_SEL NDEF P2P-CR', None,
+               1, 'wpas_ctrl_nfc_get_handover_sel_p2p'),
+              ('NFC_GET_HANDOVER_SEL NDEF P2P-CR-TAG', 'FAIL',
+               2, 'wpas_ctrl_nfc_get_handover_sel_p2p'),
+              ('NFC_GET_HANDOVER_SEL NDEF P2P-CR', 'FAIL',
+               2, 'wpas_ctrl_nfc_get_handover_sel_p2p'),
+              ('NFC_GET_HANDOVER_SEL NDEF P2P-CR-TAG', 'FAIL',
+               3, 'wpas_ctrl_nfc_get_handover_sel_p2p'),
+              ('NFC_GET_HANDOVER_SEL NDEF P2P-CR', 'FAIL',
+               3, 'wpas_ctrl_nfc_get_handover_sel_p2p'),
+              ('NFC_GET_HANDOVER_SEL NDEF P2P-CR-TAG', 'FAIL',
+               4, 'wpas_ctrl_nfc_get_handover_sel_p2p'),
+              ('NFC_GET_HANDOVER_SEL NDEF P2P-CR', 'FAIL',
+               4, 'wpas_ctrl_nfc_get_handover_sel_p2p'),
+              ('P2P_ASP_PROVISION_RESP 00:11:22:33:44:55 id=1', 'FAIL',
+               1, 'p2p_parse_asp_provision_cmd'),
+              ('P2P_SERV_DISC_REQ 00:11:22:33:44:55 02000001', 'FAIL',
+               1, 'p2p_ctrl_serv_disc_req'),
+              ('P2P_SERV_DISC_RESP 2412 00:11:22:33:44:55 1 00', 'FAIL',
+               1, 'p2p_ctrl_serv_disc_resp'),
+              ('P2P_SERVICE_ADD bonjour 0b5f6166706f766572746370c00c000c01 074578616d706c65c027',
+               'FAIL',
+               1, 'p2p_ctrl_service_add_bonjour'),
+              ('P2P_SERVICE_ADD bonjour 0b5f6166706f766572746370c00c000c01 074578616d706c65c027',
+               'FAIL',
+               2, 'p2p_ctrl_service_add_bonjour'),
+              ('P2P_SERVICE_ADD bonjour 0b5f6166706f766572746370c00c000c01 074578616d706c65c027',
+               'FAIL',
+               3, 'p2p_ctrl_service_add_bonjour'),
+              ('P2P_SERVICE_DEL bonjour 0b5f6166706f766572746370c00c000c01',
+               'FAIL',
+               1, 'p2p_ctrl_service_del_bonjour'),
+              ('GAS_REQUEST 00:11:22:33:44:55 00', 'FAIL',
+               1, 'gas_request'),
+              ('GAS_REQUEST 00:11:22:33:44:55 00 11', 'FAIL',
+               2, 'gas_request'),
+              ('HS20_GET_NAI_HOME_REALM_LIST 00:11:22:33:44:55 realm=example.com',
+              'FAIL',
+              1, 'hs20_nai_home_realm_list'),
+              ('HS20_GET_NAI_HOME_REALM_LIST 00:11:22:33:44:55 00',
+              'FAIL',
+              1, 'hs20_get_nai_home_realm_list'),
+              ('WNM_SLEEP enter tfs_req=11', 'FAIL',
+               1, 'wpas_ctrl_iface_wnm_sleep'),
+              ('WNM_SLEEP enter tfs_req=11', 'FAIL',
+               2, 'wpas_ctrl_iface_wnm_sleep'),
+              ('WNM_SLEEP enter tfs_req=11', 'FAIL',
+               3, 'wpas_ctrl_iface_wnm_sleep'),
+              ('WNM_SLEEP enter tfs_req=11', 'FAIL',
+               4, 'wpas_ctrl_iface_wnm_sleep'),
+              ('WNM_SLEEP enter tfs_req=11', 'FAIL',
+               5, 'wpas_ctrl_iface_wnm_sleep'),
+              ('WNM_SLEEP enter', 'FAIL',
+               3, 'wpas_ctrl_iface_wnm_sleep'),
+              ('VENDOR 1 1 00', 'FAIL',
+               1, 'wpa_supplicant_vendor_cmd'),
+              ('VENDOR 1 1 00', 'FAIL',
+               2, 'wpa_supplicant_vendor_cmd'),
+              ('RADIO_WORK add test', 'FAIL',
+               1, 'wpas_ctrl_radio_work_add'),
+              ('RADIO_WORK add test', 'FAIL',
+               2, 'wpas_ctrl_radio_work_add'),
+              ('AUTOSCAN periodic:1', 'FAIL',
+               1, 'wpa_supplicant_ctrl_iface_autoscan'),
+              ('PING', None,
+               1, 'wpa_supplicant_ctrl_iface_process') ]
+    for cmd,exp,count,func in tests:
+        with alloc_fail(dev[0], count, func):
+            res = dev[0].request(cmd)
+            if exp and exp not in res:
+                raise Exception("Unexpected success for '%s' during OOM" % cmd)
+
+    tests = [ ('FOO', None,
+               1, 'wpa_supplicant_global_ctrl_iface_process'),
+              ('IFNAME=notfound PING', 'FAIL\n',
+               1, 'wpas_global_ctrl_iface_ifname') ]
+    for cmd,exp,count,func in tests:
+        with alloc_fail(dev[0], count, func):
+            res = dev[0].global_request(cmd)
+            if exp and exp not in res:
+                raise Exception("Unexpected success for '%s' during OOM" % cmd)
+
+def test_wpas_ctrl_socket_full(dev, apdev, test_params):
+    """wpa_supplicant control socket and full send buffer"""
+    if not dev[0].ping():
+        raise Exception("Could not ping wpa_supplicant at the beginning of the test")
+    dev[0].get_status()
+
+    counter = 0
+
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    local = "/tmp/wpa_ctrl_test_%d-%d" % (os.getpid(), counter)
+    counter += 1
+    s.bind(local)
+    s.connect("/var/run/wpa_supplicant/wlan0")
+    for i in range(20):
+        logger.debug("Command %d" % i)
+        try:
+            s.send("MIB")
+        except Exception, e:
+            logger.info("Could not send command %d: %s" % (i, str(e)))
+            break
+        # Close without receiving response
+        time.sleep(0.01)
+
+    if not dev[0].ping():
+        raise Exception("Could not ping wpa_supplicant in the middle of the test")
+    dev[0].get_status()
+
+    s2 = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    local2 = "/tmp/wpa_ctrl_test_%d-%d" % (os.getpid(), counter)
+    counter += 1
+    s2.bind(local2)
+    s2.connect("/var/run/wpa_supplicant/wlan0")
+    for i in range(10):
+        logger.debug("Command %d [2]" % i)
+        try:
+            s2.send("MIB")
+        except Exception, e:
+            logger.info("Could not send command %d [2]: %s" % (i, str(e)))
+            break
+        # Close without receiving response
+        time.sleep(0.01)
+
+    s.close()
+    os.unlink(local)
+
+    for i in range(10):
+        logger.debug("Command %d [3]" % i)
+        try:
+            s2.send("MIB")
+        except Exception, e:
+            logger.info("Could not send command %d [3]: %s" % (i, str(e)))
+            break
+        # Close without receiving response
+        time.sleep(0.01)
+
+    s2.close()
+    os.unlink(local2)
+
+    if not dev[0].ping():
+        raise Exception("Could not ping wpa_supplicant in the middle of the test [2]")
+    dev[0].get_status()
+
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    local = "/tmp/wpa_ctrl_test_%d-%d" % (os.getpid(), counter)
+    counter += 1
+    s.bind(local)
+    s.connect("/var/run/wpa_supplicant/wlan0")
+    s.send("ATTACH")
+    res = s.recv(100)
+    if "OK" not in res:
+        raise Exception("Could not attach a test socket")
+
+    for i in range(5):
+        dev[0].scan(freq=2412)
+
+    s.close()
+    os.unlink(local)
+
+    for i in range(5):
+        dev[0].scan(freq=2412)
+
+    if not dev[0].ping():
+        raise Exception("Could not ping wpa_supplicant at the end of the test")
+    dev[0].get_status()

@@ -10,6 +10,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 import hwsim_utils
+from utils import alloc_fail
 
 grpform_events = ["P2P-GROUP-STARTED",
                   "P2P-GO-NEG-FAILURE",
@@ -41,6 +42,9 @@ def check_ip_addr(res):
 def test_nfc_p2p_go_neg(dev):
     """NFC connection handover to form a new P2P group (initiator becomes GO)"""
     set_ip_addr_info(dev[0])
+    ip = dev[0].request("GET ip_addr_go")
+    if ip != "192.168.42.1":
+        raise Exception("Unexpected ip_addr_go returned: " + ip)
     dev[0].global_request("SET p2p_go_intent 10")
     logger.info("Perform NFC connection handover")
     req = dev[0].global_request("NFC_GET_HANDOVER_REQ NDEF P2P-CR").rstrip()
@@ -79,6 +83,52 @@ def test_nfc_p2p_go_neg(dev):
         raise Exception("Unexpected roles negotiated")
     hwsim_utils.test_connectivity_p2p(dev[0], dev[1])
     check_ip_addr(res1)
+
+def test_nfc_p2p_go_neg_ip_pool_oom(dev):
+    """NFC connection handover to form a new P2P group and IP pool OOM"""
+    set_ip_addr_info(dev[0])
+    ip = dev[0].request("GET ip_addr_go")
+    if ip != "192.168.42.1":
+        raise Exception("Unexpected ip_addr_go returned: " + ip)
+    dev[0].global_request("SET p2p_go_intent 10")
+    logger.info("Perform NFC connection handover")
+    req = dev[0].global_request("NFC_GET_HANDOVER_REQ NDEF P2P-CR").rstrip()
+    if "FAIL" in req:
+        raise Exception("Failed to generate NFC connection handover request")
+    sel = dev[1].global_request("NFC_GET_HANDOVER_SEL NDEF P2P-CR").rstrip()
+    if "FAIL" in sel:
+        raise Exception("Failed to generate NFC connection handover select")
+    dev[0].dump_monitor()
+    dev[1].dump_monitor()
+
+    with alloc_fail(dev[0], 1, "bitfield_alloc;wpa_init"):
+        res = dev[1].global_request("NFC_REPORT_HANDOVER RESP P2P " + req + " " + sel)
+        if "FAIL" in res:
+            raise Exception("Failed to report NFC connection handover to wpa_supplicant(resp)")
+        res = dev[0].global_request("NFC_REPORT_HANDOVER INIT P2P " + req + " " + sel)
+        if "FAIL" in res:
+            raise Exception("Failed to report NFC connection handover to wpa_supplicant(init)")
+
+        ev = dev[0].wait_global_event(["P2P-GROUP-STARTED",
+                                       "P2P-GO-NEG-FAILURE",
+                                       "P2P-GROUP-FORMATION-FAILURE",
+                                       "WPS-PIN-NEEDED"], timeout=15)
+        if ev is None:
+            raise Exception("Group formation timed out")
+        res0 = dev[0].group_form_result(ev)
+
+    ev = dev[1].wait_global_event(["P2P-GROUP-STARTED",
+                                   "P2P-GO-NEG-FAILURE",
+                                   "P2P-GROUP-FORMATION-FAILURE",
+                                   "WPS-PIN-NEEDED"], timeout=1)
+    if ev is None:
+        raise Exception("Group formation timed out")
+    res1 = dev[1].group_form_result(ev)
+    logger.info("Group formed")
+
+    hwsim_utils.test_connectivity_p2p(dev[0], dev[1])
+    if 'ip_addr' in res1:
+        raise Exception("Unexpectedly received IP address from GO")
 
 def test_nfc_p2p_go_neg_reverse(dev):
     """NFC connection handover to form a new P2P group (responder becomes GO)"""
@@ -718,3 +768,20 @@ def test_nfc_p2p_tag_enable_disable(dev):
         raise Exception("Failed to enable NFC Tag for P2P static handover")
     if "OK" not in dev[0].request("P2P_SET nfc_tag 0"):
         raise Exception("Failed to disable NFC Tag for P2P static handover")
+
+def test_nfc_p2p_static_handover_invalid(dev):
+    """NFC static handover with invalid contents"""
+    logger.info("Unknown OOB GO Neg channel")
+    sel = "D217A36170706C69636174696F6E2F766E642E7766612E7032700071102100012010230001201024000120102C0036C3B2ADB8D26F53CE1CB7F000BEEDA762922FF5307E87CCE484EF4B5DAD440D0A4752579767610AD1293F7A76A66B09A7C9D58A66994E103C000103104200012010470010572CF82FC95756539B16B5CFB298ABF11049000600372A000120002E02020025000D1D000200000001001108000000000000000000101100084465766963652042130600585804ff0B00"
+    if "FAIL" not in dev[0].global_request("WPS_NFC_TAG_READ " + sel):
+        raise Exception("Invalid tag contents accepted (1)")
+
+    logger.info("No OOB GO Neg channel attribute")
+    sel = "D2179A6170706C69636174696F6E2F766E642E7766612E7032700071102100012010230001201024000120102C0036C3B2ADB8D26F53CE1CB7F000BEEDA762922FF5307E87CCE484EF4B5DAD440D0A4752579767610AD1293F7A76A66B09A7C9D58A66994E103C000103104200012010470010572CF82FC95756539B16B5CFB298ABF11049000600372A000120002502020025000D1D000200000001001108000000000000000000101100084465766963652042"
+    if "FAIL" not in dev[0].global_request("WPS_NFC_TAG_READ " + sel):
+        raise Exception("Invalid tag contents accepted (2)")
+
+    logger.info("No Device Info attribute")
+    sel = "D217836170706C69636174696F6E2F766E642E7766612E7032700071102100012010230001201024000120102C0036C3B2ADB8D26F53CE1CB7F000BEEDA762922FF5307E87CCE484EF4B5DAD440D0A4752579767610AD1293F7A76A66B09A7C9D58A66994E103C000103104200012010470010572CF82FC95756539B16B5CFB298ABF11049000600372A000120000E0202002500130600585804510B00"
+    if "FAIL" not in dev[0].global_request("WPS_NFC_TAG_READ " + sel):
+        raise Exception("Invalid tag contents accepted (3)")

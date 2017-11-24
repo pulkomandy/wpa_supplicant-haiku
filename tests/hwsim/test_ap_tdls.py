@@ -13,7 +13,7 @@ import hwsim_utils
 from hostapd import HostapdGlobal
 from hostapd import Hostapd
 import hostapd
-from utils import HwsimSkip
+from utils import HwsimSkip, skip_with_fips
 from wlantest import Wlantest
 
 def start_ap_wpa2_psk(ifname):
@@ -147,6 +147,22 @@ def teardown_tdls(sta0, sta1, ap, responder=False, wildcard=False):
     tdls_check_ap(sta0, sta1, bssid, addr0, addr1)
     check_connectivity(sta0, sta1, hapd)
 
+def check_tdls_link(sta0, sta1, connected=True):
+    addr0 = sta0.own_addr()
+    addr1 = sta1.own_addr()
+    status0 = sta0.tdls_link_status(addr1).rstrip()
+    status1 = sta1.tdls_link_status(addr0).rstrip()
+    logger.info("%s: %s" % (sta0.ifname, status0))
+    logger.info("%s: %s" % (sta1.ifname, status1))
+    if status0 != status1:
+        raise Exception("TDLS link status differs between stations")
+    if "status: connected" in status0:
+        if not connected:
+            raise Exception("Expected TDLS link status NOT to be connected")
+    else:
+        if connected:
+            raise Exception("Expected TDLS link status to be connected")
+
 def test_ap_tdls_discovery(dev, apdev):
     """WPA2-PSK AP and two stations using TDLS discovery"""
     hapd = start_ap_wpa2_psk(apdev[0]['ifname'])
@@ -255,6 +271,7 @@ def test_ap_wpa2_tdls_wrong_tpk_m3_mic(dev, apdev):
 
 def test_ap_wpa_tdls(dev, apdev):
     """WPA-PSK AP and two stations using TDLS"""
+    skip_with_fips(dev[0])
     hapd = hostapd.add_ap(apdev[0]['ifname'],
                           hostapd.wpa_params(ssid="test-wpa-psk",
                                              passphrase="12345678"))
@@ -266,6 +283,7 @@ def test_ap_wpa_tdls(dev, apdev):
 
 def test_ap_wpa_mixed_tdls(dev, apdev):
     """WPA+WPA2-PSK AP and two stations using TDLS"""
+    skip_with_fips(dev[0])
     hapd = hostapd.add_ap(apdev[0]['ifname'],
                           hostapd.wpa_mixed_params(ssid="test-wpa-mixed-psk",
                                                    passphrase="12345678"))
@@ -375,3 +393,16 @@ def test_tdls_chan_switch(dev, apdev):
         raise Exception("Could not disable TDLS channel switching")
     if "FAIL" not in dev[0].request("TDLS_CANCEL_CHAN_SWITCH " + dev[1].own_addr()):
         raise Exception("TDLS_CANCEL_CHAN_SWITCH accepted even though channel switching was already disabled")
+
+def test_ap_tdls_link_status(dev, apdev):
+    """Check TDLS link status between two stations"""
+    hapd = start_ap_wpa2_psk(apdev[0]['ifname'])
+    wlantest_setup()
+    connect_2sta_wpa2_psk(dev, hapd)
+    check_tdls_link(dev[0], dev[1], connected=False)
+    setup_tdls(dev[0], dev[1], apdev[0])
+    check_tdls_link(dev[0], dev[1], connected=True)
+    teardown_tdls(dev[0], dev[1], apdev[0])
+    check_tdls_link(dev[0], dev[1], connected=False)
+    if "FAIL" not in dev[0].request("TDLS_LINK_STATUS foo"):
+        raise Exception("Unexpected TDLS_LINK_STATUS response for invalid argument")

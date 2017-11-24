@@ -56,6 +56,47 @@ def test_ap_vht80(dev, apdev):
         subprocess.call(['iw', 'reg', 'set', '00'])
         dev[0].flush_scan_cache()
 
+def vht80_test(apdev, dev, channel, ht_capab):
+    try:
+        hapd = None
+        params = { "ssid": "vht",
+                   "country_code": "FI",
+                   "hw_mode": "a",
+                   "channel": str(channel),
+                   "ht_capab": ht_capab,
+                   "ieee80211n": "1",
+                   "ieee80211ac": "1",
+                   "vht_oper_chwidth": "1",
+                   "vht_oper_centr_freq_seg0_idx": "42" }
+        hapd = hostapd.add_ap(apdev['ifname'], params)
+        bssid = apdev['bssid']
+
+        dev.connect("vht", key_mgmt="NONE", scan_freq=str(5000 + 5 * channel))
+        hwsim_utils.test_connectivity(dev, hapd)
+    except Exception, e:
+        if isinstance(e, Exception) and str(e) == "AP startup failed":
+            if not vht_supported():
+                raise HwsimSkip("80 MHz channel not supported in regulatory information")
+        raise
+    finally:
+        dev.request("DISCONNECT")
+        if hapd:
+            hapd.request("DISABLE")
+        subprocess.call(['iw', 'reg', 'set', '00'])
+        dev.flush_scan_cache()
+
+def test_ap_vht80b(dev, apdev):
+    """VHT with 80 MHz channel width (HT40- channel 40)"""
+    vht80_test(apdev[0], dev[0], 40, "[HT40-]")
+
+def test_ap_vht80c(dev, apdev):
+    """VHT with 80 MHz channel width (HT40+ channel 44)"""
+    vht80_test(apdev[0], dev[0], 44, "[HT40+]")
+
+def test_ap_vht80d(dev, apdev):
+    """VHT with 80 MHz channel width (HT40- channel 48)"""
+    vht80_test(apdev[0], dev[0], 48, "[HT40-]")
+
 def test_ap_vht80_params(dev, apdev):
     """VHT with 80 MHz channel width and number of optional features enabled"""
     try:
@@ -164,7 +205,7 @@ def test_ap_vht_capab_not_supported(dev, apdev):
                    "ieee80211n": "1",
                    "ieee80211ac": "1",
                    "vht_oper_chwidth": "1",
-                   "vht_capab": "[MAX-MPDU-7991][MAX-MPDU-11454][VHT160][VHT160-80PLUS80][RXLDPC][SHORT-GI-80][SHORT-GI-160][TX-STBC-2BY1][RX-STBC-1][RX-STBC-12][RX-STBC-123][RX-STBC-1234][SU-BEAMFORMER][SU-BEAMFORMEE][BF-ANTENNA-2][SOUNDING-DIMENSION-2][MU-BEAMFORMER][MU-BEAMFORMEE][VHT-TXOP-PS][HTC-VHT][MAX-A-MPDU-LEN-EXP0][MAX-A-MPDU-LEN-EXP7][VHT-LINK-ADAPT2][VHT-LINK-ADAPT3][RX-ANTENNA-PATTERN][TX-ANTENNA-PATTERN]",
+                   "vht_capab": "[MAX-MPDU-7991][MAX-MPDU-11454][VHT160][VHT160-80PLUS80][RXLDPC][SHORT-GI-80][SHORT-GI-160][TX-STBC-2BY1][RX-STBC-1][RX-STBC-12][RX-STBC-123][RX-STBC-1234][SU-BEAMFORMER][SU-BEAMFORMEE][BF-ANTENNA-2][BF-ANTENNA-3][BF-ANTENNA-4][SOUNDING-DIMENSION-2][SOUNDING-DIMENSION-3][SOUNDING-DIMENSION-4][MU-BEAMFORMER][VHT-TXOP-PS][HTC-VHT][MAX-A-MPDU-LEN-EXP0][MAX-A-MPDU-LEN-EXP7][VHT-LINK-ADAPT2][VHT-LINK-ADAPT3][RX-ANTENNA-PATTERN][TX-ANTENNA-PATTERN]",
                    "vht_oper_centr_freq_seg0_idx": "42",
                    "require_vht": "1" }
         hapd = hostapd.add_ap(apdev[0]['ifname'], params, wait_enabled=False)
@@ -211,8 +252,8 @@ def test_ap_vht160(dev, apdev):
         params = { "ssid": "vht2",
                    "country_code": "FI",
                    "hw_mode": "a",
-                   "channel": "100",
-                   "ht_capab": "[HT40+]",
+                   "channel": "104",
+                   "ht_capab": "[HT40-]",
                    "ieee80211n": "1",
                    "ieee80211ac": "1",
                    "vht_oper_chwidth": "2",
@@ -248,7 +289,7 @@ def test_ap_vht160(dev, apdev):
         ev = wait_dfs_event(hapd2, "DFS-CAC-COMPLETED", 70)
         if "success=1" not in ev:
             raise Exception("CAC failed(2)")
-        if "freq=5500" not in ev:
+        if "freq=5520" not in ev:
             raise Exception("Unexpected DFS freq result(2)")
 
         ev = hapd2.wait_event(["AP-ENABLED"], timeout=5)
@@ -260,7 +301,7 @@ def test_ap_vht160(dev, apdev):
             raise Exception("Unexpected interface state(2)")
 
         freq = hapd2.get_status_field("freq")
-        if freq != "5500":
+        if freq != "5520":
             raise Exception("Unexpected frequency(2)")
 
         dev[0].connect("vht", key_mgmt="NONE", scan_freq="5180")
@@ -270,10 +311,10 @@ def test_ap_vht160(dev, apdev):
             raise Exception("Unexpected SIGNAL_POLL value(1): " + str(sig))
         if "WIDTH=160 MHz" not in sig:
             raise Exception("Unexpected SIGNAL_POLL value(2): " + str(sig))
-        dev[1].connect("vht2", key_mgmt="NONE", scan_freq="5500")
+        dev[1].connect("vht2", key_mgmt="NONE", scan_freq="5520")
         hwsim_utils.test_connectivity(dev[1], hapd2)
         sig = dev[1].request("SIGNAL_POLL").splitlines()
-        if "FREQUENCY=5500" not in sig:
+        if "FREQUENCY=5520" not in sig:
             raise Exception("Unexpected SIGNAL_POLL value(1): " + str(sig))
         if "WIDTH=160 MHz" not in sig:
             raise Exception("Unexpected SIGNAL_POLL value(2): " + str(sig))

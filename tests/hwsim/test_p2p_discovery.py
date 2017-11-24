@@ -79,6 +79,10 @@ def test_discovery(dev):
         raise Exception("P2P_FIND with invalid dev_id accepted")
     if "FAIL" not in dev[0].p2p_find(dev_type="foo"):
         raise Exception("P2P_FIND with invalid dev_type accepted")
+    if "FAIL" not in dev[0].p2p_find(dev_type="1-foo-2"):
+        raise Exception("P2P_FIND with invalid dev_type accepted")
+    if "FAIL" not in dev[0].p2p_find(dev_type="1-11223344"):
+        raise Exception("P2P_FIND with invalid dev_type accepted")
 
     if "FAIL" not in dev[0].global_request("P2P_PROV_DISC foo pbc"):
         raise Exception("Invalid P2P_PROV_DISC accepted")
@@ -289,6 +293,7 @@ def test_discovery_and_interface_disabled(dev):
 
 def test_discovery_auto(dev):
     """P2P device discovery and provision discovery with auto GO/dev selection"""
+    dev[0].flush_scan_cache()
     addr0 = dev[0].p2p_dev_addr()
     addr1 = dev[1].p2p_dev_addr()
     addr2 = dev[2].p2p_dev_addr()
@@ -439,3 +444,34 @@ def test_p2p_listen_and_scan(dev):
     ev = dev[0].wait_event(["CTRL-EVENT-SCAN-RESULTS"], 15)
     if ev is None:
         raise Exception("Scan timed out")
+
+def test_p2p_config_methods(dev):
+    """P2P and WPS config method update"""
+    addr0 = dev[0].p2p_dev_addr()
+    wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+    wpas.interface_add("wlan5")
+    addr1 = wpas.p2p_dev_addr()
+
+    if "OK" not in wpas.request("SET config_methods keypad virtual_push_button"):
+        raise Exception("Failed to set config_methods")
+
+    wpas.p2p_listen()
+    if not dev[0].discover_peer(addr1):
+        raise Exception("Device discovery timed out")
+    dev[0].p2p_stop_find()
+    peer = dev[0].get_peer(addr1)
+    if peer['config_methods'] != '0x180':
+        raise Exception("Unexpected peer config methods(1): " + peer['config_methods'])
+    dev[0].global_request("P2P_FLUSH")
+
+    if "OK" not in wpas.request("SET config_methods virtual_display"):
+        raise Exception("Failed to set config_methods")
+
+    if not dev[0].discover_peer(addr1):
+        raise Exception("Device discovery timed out")
+    dev[0].p2p_stop_find()
+    peer = dev[0].get_peer(addr1)
+    if peer['config_methods'] != '0x8':
+        raise Exception("Unexpected peer config methods(2): " + peer['config_methods'])
+
+    wpas.p2p_stop_find()

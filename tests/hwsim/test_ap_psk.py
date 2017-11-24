@@ -17,7 +17,7 @@ import subprocess
 import time
 
 import hostapd
-from utils import HwsimSkip
+from utils import HwsimSkip, fail_test, skip_with_fips
 import hwsim_utils
 from wpasupplicant import WpaSupplicant
 
@@ -67,6 +67,40 @@ def test_ap_wpa2_psk_file(dev, apdev):
     if ev is None:
         raise Exception("Timed out while waiting for failure report")
     dev[1].request("REMOVE_NETWORK all")
+
+def test_ap_wpa2_psk_mem(dev, apdev):
+    """WPA2-PSK AP with passphrase only in memory"""
+    try:
+        _test_ap_wpa2_psk_mem(dev, apdev)
+    finally:
+        dev[0].request("SCAN_INTERVAL 5")
+        dev[1].request("SCAN_INTERVAL 5")
+
+def _test_ap_wpa2_psk_mem(dev, apdev):
+    ssid = "test-wpa2-psk"
+    passphrase = 'qwertyuiop'
+    psk = '602e323e077bc63bd80307ef4745b754b0ae0a925c2638ecd13a794b9527b9e6'
+    params = hostapd.wpa2_params(ssid=ssid)
+    params['wpa_psk'] = psk
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+
+    dev[0].connect(ssid, mem_only_psk="1", scan_freq="2412", wait_connect=False)
+    dev[0].request("SCAN_INTERVAL 1")
+    ev = dev[0].wait_event(["CTRL-REQ-PSK_PASSPHRASE"], timeout=10)
+    if ev is None:
+        raise Exception("Request for PSK/passphrase timed out")
+    id = ev.split(':')[0].split('-')[-1]
+    dev[0].request("CTRL-RSP-PSK_PASSPHRASE-" + id + ':"' + passphrase + '"')
+    dev[0].wait_connected(timeout=10)
+
+    dev[1].connect(ssid, mem_only_psk="1", scan_freq="2412", wait_connect=False)
+    dev[1].request("SCAN_INTERVAL 1")
+    ev = dev[1].wait_event(["CTRL-REQ-PSK_PASSPHRASE"], timeout=10)
+    if ev is None:
+        raise Exception("Request for PSK/passphrase timed out(2)")
+    id = ev.split(':')[0].split('-')[-1]
+    dev[1].request("CTRL-RSP-PSK_PASSPHRASE-" + id + ':' + psk)
+    dev[1].wait_connected(timeout=10)
 
 def test_ap_wpa2_ptk_rekey(dev, apdev):
     """WPA2-PSK AP and PTK rekey enforced by station"""
@@ -128,6 +162,7 @@ def test_ap_wpa2_sha256_ptk_rekey_ap(dev, apdev):
 
 def test_ap_wpa_ptk_rekey(dev, apdev):
     """WPA-PSK/TKIP AP and PTK rekey enforced by station"""
+    skip_with_fips(dev[0])
     ssid = "test-wpa-psk"
     passphrase = 'qwertyuiop'
     params = hostapd.wpa_params(ssid=ssid, passphrase=passphrase)
@@ -142,6 +177,7 @@ def test_ap_wpa_ptk_rekey(dev, apdev):
 
 def test_ap_wpa_ptk_rekey_ap(dev, apdev):
     """WPA-PSK/TKIP AP and PTK rekey enforced by AP"""
+    skip_with_fips(dev[0])
     ssid = "test-wpa-psk"
     passphrase = 'qwertyuiop'
     params = hostapd.wpa_params(ssid=ssid, passphrase=passphrase)
@@ -260,6 +296,7 @@ def test_ap_wpa2_gtk_rekey(dev, apdev):
 
 def test_ap_wpa_gtk_rekey(dev, apdev):
     """WPA-PSK/TKIP AP and GTK rekey enforced by AP"""
+    skip_with_fips(dev[0])
     ssid = "test-wpa-psk"
     passphrase = 'qwertyuiop'
     params = hostapd.wpa_params(ssid=ssid, passphrase=passphrase)
@@ -1844,3 +1881,185 @@ def test_ap_wpa2_psk_drop_first_msg_4(dev, apdev):
         # optimized to prevent EAPOL-Key frame encryption for retransmission
         # case, this exception can be uncommented here.
         #raise Exception("Unexpected disconnection")
+
+def test_ap_wpa2_psk_disable_enable(dev, apdev):
+    """WPA2-PSK AP getting disabled and re-enabled"""
+    ssid = "test-wpa2-psk"
+    passphrase = 'qwertyuiop'
+    psk = '602e323e077bc63bd80307ef4745b754b0ae0a925c2638ecd13a794b9527b9e6'
+    params = hostapd.wpa2_params(ssid=ssid)
+    params['wpa_psk'] = psk
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    dev[0].connect(ssid, raw_psk=psk, scan_freq="2412")
+
+    for i in range(2):
+        hapd.request("DISABLE")
+        dev[0].wait_disconnected()
+        hapd.request("ENABLE")
+        dev[0].wait_connected()
+        hwsim_utils.test_connectivity(dev[0], hapd)
+
+def test_ap_wpa2_psk_incorrect_passphrase(dev, apdev):
+    """WPA2-PSK AP and station using incorrect passphrase"""
+    ssid = "test-wpa2-psk"
+    passphrase = 'qwertyuiop'
+    params = hostapd.wpa2_params(ssid=ssid, passphrase=passphrase)
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    dev[0].connect(ssid, psk="incorrect passphrase", scan_freq="2412",
+                   wait_connect=False)
+    ev = hapd.wait_event(["AP-STA-POSSIBLE-PSK-MISMATCH"], timeout=10)
+    if ev is None:
+        raise Exception("No AP-STA-POSSIBLE-PSK-MISMATCH reported")
+    dev[0].dump_monitor()
+
+    hapd.disable()
+    hapd.set("wpa_passphrase", "incorrect passphrase")
+    hapd.enable()
+
+    dev[0].wait_connected(timeout=20)
+
+def test_ap_wpa_ie_parsing(dev, apdev):
+    """WPA IE parsing"""
+    skip_with_fips(dev[0])
+    ssid = "test-wpa-psk"
+    passphrase = 'qwertyuiop'
+    params = hostapd.wpa_params(ssid=ssid, passphrase=passphrase)
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    id = dev[0].connect(ssid, psk=passphrase, scan_freq="2412",
+                        only_add_network=True)
+
+    tests = [ "dd040050f201",
+              "dd050050f20101",
+              "dd060050f2010100",
+              "dd060050f2010001",
+              "dd070050f201010000",
+              "dd080050f20101000050",
+              "dd090050f20101000050f2",
+              "dd0a0050f20101000050f202",
+              "dd0b0050f20101000050f20201",
+              "dd0c0050f20101000050f2020100",
+              "dd0c0050f20101000050f2020000",
+              "dd0c0050f20101000050f202ffff",
+              "dd0d0050f20101000050f202010000",
+              "dd0e0050f20101000050f20201000050",
+              "dd0f0050f20101000050f20201000050f2",
+              "dd100050f20101000050f20201000050f202",
+              "dd110050f20101000050f20201000050f20201",
+              "dd120050f20101000050f20201000050f2020100",
+              "dd120050f20101000050f20201000050f2020000",
+              "dd120050f20101000050f20201000050f202ffff",
+              "dd130050f20101000050f20201000050f202010000",
+              "dd140050f20101000050f20201000050f20201000050",
+              "dd150050f20101000050f20201000050f20201000050f2" ]
+    for t in tests:
+        try:
+            if "OK" not in dev[0].request("VENDOR_ELEM_ADD 13 " + t):
+                raise Exception("VENDOR_ELEM_ADD failed")
+            dev[0].select_network(id)
+            ev = dev[0].wait_event(["CTRL-EVENT-ASSOC-REJECT"], timeout=10)
+            if ev is None:
+                raise Exception("Association rejection not reported")
+            dev[0].request("DISCONNECT")
+        finally:
+            dev[0].request("VENDOR_ELEM_REMOVE 13 *")
+
+    tests = [ "dd170050f20101000050f20201000050f20201000050f202ff",
+              "dd180050f20101000050f20201000050f20201000050f202ffff",
+              "dd190050f20101000050f20201000050f20201000050f202ffffff" ]
+    for t in tests:
+        try:
+            if "OK" not in dev[0].request("VENDOR_ELEM_ADD 13 " + t):
+                raise Exception("VENDOR_ELEM_ADD failed")
+            dev[0].select_network(id)
+            dev[0].wait_connected()
+            dev[0].request("DISCONNECT")
+        finally:
+            dev[0].request("VENDOR_ELEM_REMOVE 13 *")
+
+def test_ap_wpa2_psk_no_random(dev, apdev):
+    """WPA2-PSK AP and no random numbers available"""
+    ssid = "test-wpa2-psk"
+    passphrase = 'qwertyuiop'
+    psk = '602e323e077bc63bd80307ef4745b754b0ae0a925c2638ecd13a794b9527b9e6'
+    params = hostapd.wpa2_params(ssid=ssid)
+    params['wpa_psk'] = psk
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    with fail_test(hapd, 1, "wpa_gmk_to_gtk"):
+        id = dev[0].connect(ssid, raw_psk=psk, scan_freq="2412",
+                            wait_connect=False)
+        ev = dev[0].wait_event(["CTRL-EVENT-DISCONNECTED"], timeout=15)
+        if ev is None:
+            raise Exception("Disconnection event not reported")
+        dev[0].request("DISCONNECT")
+        dev[0].select_network(id, freq=2412)
+        dev[0].wait_connected()
+
+def test_rsn_ie_proto_psk_sta(dev, apdev):
+    """RSN element protocol testing for PSK cases on STA side"""
+    bssid = apdev[0]['bssid']
+    ssid = "test-wpa2-psk"
+    passphrase = 'qwertyuiop'
+    params = hostapd.wpa2_params(ssid=ssid, passphrase=passphrase)
+    # This is the RSN element used normally by hostapd
+    params['own_ie_override'] = '30140100000fac040100000fac040100000fac020c00'
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    if "FAIL" not in hapd.request("SET own_ie_override qwerty"):
+        raise Exception("Invalid own_ie_override value accepted")
+    id = dev[0].connect(ssid, psk=passphrase, scan_freq="2412")
+
+    tests = [ ('No RSN Capabilities field',
+               '30120100000fac040100000fac040100000fac02'),
+              ('Reserved RSN Capabilities bits set',
+               '30140100000fac040100000fac040100000fac023cff'),
+              ('Extra pairwise cipher suite (unsupported)',
+               '30180100000fac040200ffffffff000fac040100000fac020c00'),
+              ('Extra AKM suite (unsupported)',
+               '30180100000fac040100000fac040200ffffffff000fac020c00'),
+              ('PMKIDCount field included',
+               '30160100000fac040100000fac040100000fac020c000000'),
+              ('Unexpected Group Management Cipher Suite with PMF disabled',
+               '301a0100000fac040100000fac040100000fac020c000000000fac06'),
+              ('Extra octet after defined fields (future extensibility)',
+               '301b0100000fac040100000fac040100000fac020c000000000fac0600') ]
+    for txt,ie in tests:
+        dev[0].request("DISCONNECT")
+        dev[0].wait_disconnected()
+        logger.info(txt)
+        hapd.disable()
+        hapd.set('own_ie_override', ie)
+        hapd.enable()
+        dev[0].request("BSS_FLUSH 0")
+        dev[0].scan_for_bss(bssid, 2412, force_scan=True, only_new=True)
+        dev[0].select_network(id, freq=2412)
+        dev[0].wait_connected()
+
+def test_ap_cli_order(dev, apdev):
+    ssid = "test-rsn-setup"
+    passphrase = 'zzzzzzzz'
+    ifname = apdev[0]['ifname']
+
+    hapd_global = hostapd.HostapdGlobal()
+    hapd_global.remove(ifname)
+    hapd_global.add(ifname)
+
+    hapd = hostapd.Hostapd(ifname)
+    hapd.set_defaults()
+    hapd.set('ssid', ssid)
+    hapd.set('wpa_passphrase', passphrase)
+    hapd.set('rsn_pairwise', 'CCMP')
+    hapd.set('wpa_key_mgmt', 'WPA-PSK')
+    hapd.set('wpa', '2')
+    hapd.enable()
+    cfg = hapd.get_config()
+    if cfg['group_cipher'] != 'CCMP':
+        raise Exception("Unexpected group_cipher: " + cfg['group_cipher'])
+    if cfg['rsn_pairwise_cipher'] != 'CCMP':
+        raise Exception("Unexpected rsn_pairwise_cipher: " + cfg['rsn_pairwise_cipher'])
+
+    ev = hapd.wait_event(["AP-ENABLED", "AP-DISABLED"], timeout=30)
+    if ev is None:
+        raise Exception("AP startup timed out")
+    if "AP-ENABLED" not in ev:
+        raise Exception("AP startup failed")
+
+    dev[0].connect(ssid, psk=passphrase, scan_freq="2412")

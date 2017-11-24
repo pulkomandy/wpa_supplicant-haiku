@@ -61,7 +61,9 @@ def test_p2p_set_discoverability(dev):
         raise Exception("P2P_SET discoverability 1 failed")
     dev[1].dump_monitor()
     dev[1].group_request("REASSOCIATE")
-    dev[1].wait_connected(timeout=20)
+    ev = dev[1].wait_group_event(["CTRL-EVENT-CONNECTED"], timeout=20)
+    if ev is None:
+        raise Exception("Connection timed out")
 
     dev[2].request("P2P_FLUSH")
     if not dev[2].discover_peer(addr1, timeout=10):
@@ -113,9 +115,9 @@ def test_p2p_set_ssid_postfix(dev):
         pin = dev[1].wps_read_pin()
         dev[0].p2p_go_authorize_client(pin)
         dev[1].p2p_connect_group(addr0, pin, timeout=20, social=True, freq="2412")
-        if postfix not in dev[1].get_status_field("ssid"):
+        if postfix not in dev[1].get_group_status_field("ssid"):
             raise Exception("SSID postfix missing from status")
-        if postfix not in dev[1].request("SCAN_RESULTS"):
+        if postfix not in dev[1].group_request("SCAN_RESULTS"):
             raise Exception("SSID postfix missing from scan results")
     finally:
         dev[0].request("P2P_SET ssid_postfix ")

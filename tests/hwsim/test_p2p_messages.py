@@ -48,6 +48,14 @@ P2P_ATTR_INTERFACE = 16
 P2P_ATTR_OPERATING_CHANNEL = 17
 P2P_ATTR_INVITATION_FLAGS = 18
 P2P_ATTR_OOB_GO_NEG_CHANNEL = 19
+P2P_ATTR_SERVICE_HASH = 21
+P2P_ATTR_SESSION_INFORMATION_DATA = 22
+P2P_ATTR_CONNECTION_CAPABILITY = 23
+P2P_ATTR_ADVERTISEMENT_ID = 24
+P2P_ATTR_ADVERTISED_SERVICE = 25
+P2P_ATTR_SESSION_ID = 26
+P2P_ATTR_FEATURE_CAPABILITY = 27
+P2P_ATTR_PERSISTENT_GROUP = 28
 P2P_ATTR_VENDOR_SPECIFIC = 221
 
 P2P_SC_SUCCESS = 0
@@ -179,7 +187,7 @@ def start_p2p(dev, apdev):
     addr0 = dev[0].p2p_dev_addr()
     dev[0].p2p_listen()
     dev[1].p2p_find(social=True)
-    ev = dev[1].wait_event(["P2P-DEVICE-FOUND"], timeout=5)
+    ev = dev[1].wait_global_event(["P2P-DEVICE-FOUND"], timeout=5)
     if ev is None:
         raise Exception("Device discovery timed out")
     dev[1].p2p_stop_find()
@@ -278,6 +286,44 @@ def test_p2p_msg_empty(dev, apdev):
     dst, src, hapd, channel = start_p2p(dev, apdev)
     msg = p2p_hdr(dst, src)
     hapd.mgmt_tx(msg)
+
+def test_p2p_msg_long_ssid(dev, apdev):
+    """P2P protocol test: Too long SSID in P2P Public Action frame"""
+    dst, src, hapd, channel = start_p2p(dev, apdev)
+
+    msg = p2p_hdr(dst, src, type=P2P_INVITATION_REQ, dialog_token=1)
+    attrs = p2p_attr_config_timeout()
+    attrs += p2p_attr_invitation_flags()
+    attrs += p2p_attr_operating_channel()
+    attrs += p2p_attr_group_bssid(src)
+    attrs += p2p_attr_channel_list()
+    attrs += p2p_attr_group_id(src, 'DIRECT-foo')
+    attrs += p2p_attr_device_info(src, config_methods=0x0108)
+    msg['payload'] += ie_p2p(attrs)
+    msg['payload'] += ie_ssid(255 * 'A')
+    hapd.mgmt_tx(msg)
+    ev = dev[0].wait_event(["P2P-DEVICE-FOUND"], timeout=5)
+    if ev is None:
+        raise Exception("Timeout on device found event")
+
+def test_p2p_msg_long_dev_name(dev, apdev):
+    """P2P protocol test: Too long Device Name in P2P Public Action frame"""
+    dst, src, hapd, channel = start_p2p(dev, apdev)
+
+    msg = p2p_hdr(dst, src, type=P2P_INVITATION_REQ, dialog_token=1)
+    attrs = p2p_attr_config_timeout()
+    attrs += p2p_attr_invitation_flags()
+    attrs += p2p_attr_operating_channel()
+    attrs += p2p_attr_group_bssid(src)
+    attrs += p2p_attr_channel_list()
+    attrs += p2p_attr_group_id(src, 'DIRECT-foo')
+    attrs += p2p_attr_device_info(src, config_methods=0x0108,
+                                  name="123456789012345678901234567890123")
+    msg['payload'] += ie_p2p(attrs)
+    hapd.mgmt_tx(msg)
+    ev = dev[0].wait_event(["P2P-DEVICE-FOUND"], timeout=0.1)
+    if ev is not None:
+        raise Exception("Unexpected device found event")
 
 def test_p2p_msg_invitation_req(dev, apdev):
     """P2P protocol tests for invitation request processing"""
@@ -537,6 +583,67 @@ def test_p2p_msg_invitation_req(dev, apdev):
     msg['payload'] += ie_p2p(attrs)
     hapd.mgmt_tx(msg)
 
+    # Too short Service Hash attribute
+    dialog_token += 1
+    msg = p2p_hdr(dst, src, type=P2P_INVITATION_REQ, dialog_token=dialog_token)
+    attrs = struct.pack("<BH5B", P2P_ATTR_SERVICE_HASH, 5, 1, 2, 3, 4, 5)
+    msg['payload'] += ie_p2p(attrs)
+    hapd.mgmt_tx(msg)
+
+    # Too short Connection Capability attribute
+    dialog_token += 1
+    msg = p2p_hdr(dst, src, type=P2P_INVITATION_REQ, dialog_token=dialog_token)
+    attrs = struct.pack("<BH", P2P_ATTR_CONNECTION_CAPABILITY, 0)
+    msg['payload'] += ie_p2p(attrs)
+    hapd.mgmt_tx(msg)
+
+    # Too short Advertisement ID attribute
+    dialog_token += 1
+    msg = p2p_hdr(dst, src, type=P2P_INVITATION_REQ, dialog_token=dialog_token)
+    attrs = struct.pack("<BH9B", P2P_ATTR_ADVERTISEMENT_ID, 9, 1, 2, 3, 4, 5,
+                        6, 7, 8, 9)
+    msg['payload'] += ie_p2p(attrs)
+    hapd.mgmt_tx(msg)
+
+    # Truncated and too short Service Instance attributes
+    dialog_token += 1
+    msg = p2p_hdr(dst, src, type=P2P_INVITATION_REQ, dialog_token=dialog_token)
+    attrs = struct.pack("<BH8B", P2P_ATTR_ADVERTISED_SERVICE, 8, 1, 2, 3, 4, 5,
+                        6, 2, 8)
+    attrs += struct.pack("<BH7B", P2P_ATTR_ADVERTISED_SERVICE, 7, 1, 2, 3, 4, 5,
+                         6, 7)
+    msg['payload'] += ie_p2p(attrs)
+    hapd.mgmt_tx(msg)
+
+    # Too short Session ID attribute
+    dialog_token += 1
+    msg = p2p_hdr(dst, src, type=P2P_INVITATION_REQ, dialog_token=dialog_token)
+    attrs = struct.pack("<BH4B", P2P_ATTR_SESSION_ID, 4, 1, 2, 3, 4)
+    msg['payload'] += ie_p2p(attrs)
+    hapd.mgmt_tx(msg)
+
+    # Too short Feature Capability attribute
+    dialog_token += 1
+    msg = p2p_hdr(dst, src, type=P2P_INVITATION_REQ, dialog_token=dialog_token)
+    attrs = struct.pack("<BH", P2P_ATTR_FEATURE_CAPABILITY, 0)
+    msg['payload'] += ie_p2p(attrs)
+    hapd.mgmt_tx(msg)
+
+    # Too short Persistent Group attribute
+    dialog_token += 1
+    msg = p2p_hdr(dst, src, type=P2P_INVITATION_REQ, dialog_token=dialog_token)
+    attrs = struct.pack("<BH5B", P2P_ATTR_PERSISTENT_GROUP, 5, 1, 2, 3, 4, 5)
+    msg['payload'] += ie_p2p(attrs)
+    hapd.mgmt_tx(msg)
+
+    # Too long Persistent Group attribute
+    dialog_token += 1
+    msg = p2p_hdr(dst, src, type=P2P_INVITATION_REQ, dialog_token=dialog_token)
+    attrs = struct.pack("<BH9L3B", P2P_ATTR_PERSISTENT_GROUP, 6 + 32 + 1,
+                        1, 2, 3, 4, 5, 6, 7, 8, 9, 1, 2, 3)
+    msg['payload'] += ie_p2p(attrs)
+    hapd.mgmt_tx(msg)
+
     if hapd.mgmt_rx(timeout=0.5) is not None:
         raise Exception("Unexpected management frame received")
 
@@ -552,10 +659,10 @@ def test_p2p_msg_invitation_req(dev, apdev):
     attrs += p2p_attr_device_info(src, config_methods=0x0108)
     msg['payload'] += ie_p2p(attrs)
     hapd.mgmt_tx(msg)
-    ev = dev[0].wait_event(["P2P-DEVICE-FOUND"], timeout=5)
+    ev = dev[0].wait_global_event(["P2P-DEVICE-FOUND"], timeout=5)
     if ev is None:
         raise Exception("Timeout on device found event")
-    ev = dev[0].wait_event(["P2P-INVITATION-RECEIVED"], timeout=5)
+    ev = dev[0].wait_global_event(["P2P-INVITATION-RECEIVED"], timeout=5)
     if ev is None:
         raise Exception("Timeout on invitation event " + str(dialog_token))
     if hapd.mgmt_rx(timeout=1) is None:
@@ -574,7 +681,7 @@ def test_p2p_msg_invitation_req(dev, apdev):
     attrs += p2p_attr_device_info(src, config_methods=0x0108)
     msg['payload'] += ie_p2p(attrs)
     hapd.mgmt_tx(msg)
-    ev = dev[0].wait_event(["P2P-INVITATION-RECEIVED"], timeout=5)
+    ev = dev[0].wait_global_event(["P2P-INVITATION-RECEIVED"], timeout=5)
     if ev is None:
         raise Exception("Timeout on invitation event " + str(dialog_token))
     if hapd.mgmt_rx(timeout=1) is None:
@@ -787,7 +894,7 @@ def test_p2p_msg_invitation_req_to_go(dev, apdev):
         raise Exception("Not a P2P Public Action frame " + str(dialog_token))
     if p2p['subtype'] != P2P_INVITATION_RESP:
         raise Exception("Unexpected subtype %d" % p2p['subtype'])
-    if p2p['p2p_status'] != 7:
+    if p2p['p2p_status'] != 7 and dev[1].get_mcc() <= 1:
         raise Exception("Unexpected status %d" % p2p['p2p_status'])
 
 def test_p2p_msg_invitation_req_unknown(dev, apdev):
@@ -806,7 +913,7 @@ def test_p2p_msg_invitation_req_unknown(dev, apdev):
     #attrs += p2p_attr_device_info(src, config_methods=0x0108)
     msg['payload'] += ie_p2p(attrs)
     hapd.mgmt_tx(msg)
-    ev = dev[0].wait_event(["P2P-INVITATION-RECEIVED"], timeout=5)
+    ev = dev[0].wait_global_event(["P2P-INVITATION-RECEIVED"], timeout=5)
     if ev is None:
         raise Exception("Timeout on invitation event " + str(dialog_token))
     if hapd.mgmt_rx(timeout=1) is None:
@@ -1108,10 +1215,10 @@ def test_p2p_msg_pd_req(dev, apdev):
     attrs += p2p_attr_device_info(src, config_methods=0x0108)
     msg['payload'] += ie_p2p(attrs)
     hapd.mgmt_tx(msg)
-    ev = dev[0].wait_event(["P2P-DEVICE-FOUND"], timeout=5)
+    ev = dev[0].wait_global_event(["P2P-DEVICE-FOUND"], timeout=5)
     if ev is None:
         raise Exception("Timeout on device found event")
-    ev = dev[0].wait_event(["P2P-PROV-DISC-SHOW-PIN"], timeout=5)
+    ev = dev[0].wait_global_event(["P2P-PROV-DISC-SHOW-PIN"], timeout=5)
     if ev is None:
         raise Exception("Timeout on PD event")
     if hapd.mgmt_rx(timeout=1) is None:
@@ -1130,7 +1237,7 @@ def test_p2p_msg_pd_req(dev, apdev):
     hapd.mgmt_tx(msg)
     if hapd.mgmt_rx(timeout=1) is None:
         raise Exception("No PD response " + str(dialog_token))
-    ev = dev[0].wait_event(["P2P-PROV-DISC-SHOW-PIN"], timeout=1)
+    ev = dev[0].wait_global_event(["P2P-PROV-DISC-SHOW-PIN"], timeout=1)
     if ev is not None:
         raise Exception("Unexpected PD event")
 
@@ -1159,10 +1266,10 @@ def test_p2p_msg_pd(dev, apdev):
     attrs += p2p_attr_device_info(src, config_methods=0x0108)
     msg['payload'] += ie_p2p(attrs)
     hapd.mgmt_tx(msg)
-    ev = dev[0].wait_event(["P2P-DEVICE-FOUND"], timeout=5)
+    ev = dev[0].wait_global_event(["P2P-DEVICE-FOUND"], timeout=5)
     if ev is None:
         raise Exception("Timeout on device found event")
-    ev = dev[0].wait_event(["P2P-PROV-DISC-SHOW-PIN"], timeout=5)
+    ev = dev[0].wait_global_event(["P2P-PROV-DISC-SHOW-PIN"], timeout=5)
     if ev is None:
         raise Exception("Timeout on PD event")
     if hapd.mgmt_rx(timeout=1) is None:
@@ -1181,7 +1288,7 @@ def test_p2p_msg_pd(dev, apdev):
     msg = p2p_hdr_resp(dst, src, type=P2P_PROV_DISC_RESP,
                        dialog_token=p2p['dialog_token'] + 1)
     hapd.mgmt_tx(msg)
-    ev = dev[0].wait_event(["P2P-PROV-DISC-FAILURE"], timeout=0.1)
+    ev = dev[0].wait_global_event(["P2P-PROV-DISC-FAILURE"], timeout=0.1)
     if ev is not None:
         raise Exception("Unexpected PD result event")
 
@@ -1189,7 +1296,7 @@ def test_p2p_msg_pd(dev, apdev):
     msg = p2p_hdr_resp(dst, src, type=P2P_PROV_DISC_RESP,
                        dialog_token=p2p['dialog_token'])
     hapd.mgmt_tx(msg)
-    ev = dev[0].wait_event(["P2P-PROV-DISC-FAILURE"], timeout=5)
+    ev = dev[0].wait_global_event(["P2P-PROV-DISC-FAILURE"], timeout=5)
     if ev is None:
         raise Exception("Timeout on PD result event")
 
@@ -1197,12 +1304,12 @@ def test_p2p_msg_pd(dev, apdev):
     msg = p2p_hdr_resp(dst, src, type=P2P_PROV_DISC_RESP,
                        dialog_token=p2p['dialog_token'])
     hapd.mgmt_tx(msg)
-    ev = dev[0].wait_event(["P2P-PROV-DISC-FAILURE"], timeout=0.1)
+    ev = dev[0].wait_global_event(["P2P-PROV-DISC-FAILURE"], timeout=0.1)
     if ev is not None:
         raise Exception("Unexpected PD result event")
 
 def check_p2p_response(hapd, dialog_token, status):
-    resp = hapd.mgmt_rx(timeout=1)
+    resp = hapd.mgmt_rx(timeout=2)
     if resp is None:
         raise Exception("No GO Neg Response " + str(dialog_token))
     p2p = parse_p2p_public_action(resp['payload'])
@@ -1281,7 +1388,7 @@ def test_p2p_msg_go_neg_req(dev, apdev):
     attrs += p2p_attr_operating_channel()
     msg['payload'] += ie_p2p(attrs)
     hapd.mgmt_tx(msg)
-    if hapd.mgmt_rx(timeout=1) is None:
+    if hapd.mgmt_rx(timeout=2) is None:
         raise Exception("No GO Neg Response " + str(dialog_token))
     time.sleep(0.1)
 
@@ -1298,7 +1405,7 @@ def test_p2p_msg_go_neg_req(dev, apdev):
     #attrs += p2p_attr_operating_channel()
     msg['payload'] += ie_p2p(attrs)
     hapd.mgmt_tx(msg)
-    if hapd.mgmt_rx(timeout=1) is None:
+    if hapd.mgmt_rx(timeout=2) is None:
         raise Exception("No GO Neg Response " + str(dialog_token))
     time.sleep(0.1)
 
@@ -1315,7 +1422,7 @@ def test_p2p_msg_go_neg_req(dev, apdev):
     attrs += p2p_attr_operating_channel()
     msg['payload'] += ie_p2p(attrs)
     hapd.mgmt_tx(msg)
-    if hapd.mgmt_rx(timeout=1) is None:
+    if hapd.mgmt_rx(timeout=2) is None:
         raise Exception("No GO Neg Response " + str(dialog_token))
     time.sleep(0.1)
 
@@ -1332,7 +1439,7 @@ def test_p2p_msg_go_neg_req(dev, apdev):
     attrs += p2p_attr_operating_channel()
     msg['payload'] += ie_p2p(attrs)
     hapd.mgmt_tx(msg)
-    if hapd.mgmt_rx(timeout=1) is None:
+    if hapd.mgmt_rx(timeout=2) is None:
         raise Exception("No GO Neg Response " + str(dialog_token))
     time.sleep(0.1)
 
@@ -1349,7 +1456,7 @@ def test_p2p_msg_go_neg_req(dev, apdev):
     attrs += p2p_attr_operating_channel()
     msg['payload'] += ie_p2p(attrs)
     hapd.mgmt_tx(msg)
-    if hapd.mgmt_rx(timeout=1) is None:
+    if hapd.mgmt_rx(timeout=2) is None:
         raise Exception("No GO Neg Response " + str(dialog_token))
     time.sleep(0.1)
 
@@ -1367,7 +1474,7 @@ def test_p2p_msg_go_neg_req(dev, apdev):
     attrs += p2p_attr_operating_channel()
     msg['payload'] += ie_p2p(attrs)
     hapd.mgmt_tx(msg)
-    if hapd.mgmt_rx(timeout=1) is None:
+    if hapd.mgmt_rx(timeout=2) is None:
         raise Exception("No GO Neg Response " + str(dialog_token))
     time.sleep(0.1)
 
@@ -1386,7 +1493,7 @@ def test_p2p_msg_go_neg_req(dev, apdev):
     attrs += p2p_attr_status(status=P2P_SC_FAIL_INFO_CURRENTLY_UNAVAILABLE)
     msg['payload'] += ie_p2p(attrs)
     hapd.mgmt_tx(msg)
-    if hapd.mgmt_rx(timeout=1) is None:
+    if hapd.mgmt_rx(timeout=2) is None:
         raise Exception("No GO Neg Response(1) " + str(dialog_token))
     time.sleep(0.1)
 
@@ -1406,7 +1513,7 @@ def test_p2p_msg_go_neg_req(dev, apdev):
     hapd.mgmt_tx(msg)
     check_p2p_response(hapd, dialog_token,
                        P2P_SC_FAIL_INFO_CURRENTLY_UNAVAILABLE)
-    ev = dev[0].wait_event(["P2P-GO-NEG-REQUEST"], timeout=1)
+    ev = dev[0].wait_global_event(["P2P-GO-NEG-REQUEST"], timeout=2)
     if ev is None:
         raise Exception("Timeout on GO Neg event " + str(dialog_token))
 
@@ -1427,7 +1534,7 @@ def test_p2p_msg_go_neg_req(dev, apdev):
     attrs += p2p_attr_operating_channel()
     msg['payload'] += ie_p2p(attrs)
     hapd.mgmt_tx(msg)
-    if hapd.mgmt_rx(timeout=1) is None:
+    if hapd.mgmt_rx(timeout=2) is None:
         raise Exception("No GO Neg Response " + str(dialog_token))
 
     # ready - invalid GO Intent GO Neg Req

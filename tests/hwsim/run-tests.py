@@ -18,6 +18,12 @@ import termios
 import logging
 logger = logging.getLogger()
 
+try:
+    import sqlite3
+    sqlite3_imported = True
+except ImportError:
+    sqlite3_imported = False
+
 scriptsdir = os.path.dirname(os.path.realpath(sys.modules[__name__].__file__))
 sys.path.append(os.path.join(scriptsdir, '..', '..', 'wpaspy'))
 
@@ -80,7 +86,7 @@ def add_log_file(conn, test, run, type, path):
     if contents is None:
         return
     sql = "INSERT INTO logs(test,run,type,contents) VALUES(?, ?, ?, ?)"
-    params = (test, run, type, contents)
+    params = (test, run, type, sqlite3.Binary(contents))
     try:
         conn.execute(sql, params)
         conn.commit()
@@ -231,7 +237,9 @@ def main():
         sys.exit(2)
 
     if args.database:
-        import sqlite3
+        if not sqlite3_imported:
+            print "No sqlite3 module found"
+            sys.exit(2)
         conn = sqlite3.connect(args.database)
         conn.execute('CREATE TABLE IF NOT EXISTS results (test,result,run,time,duration,build,commitid)')
         conn.execute('CREATE TABLE IF NOT EXISTS tests (test,description)')
@@ -483,10 +491,17 @@ def main():
                 result = "FAIL"
                 hapd = None
             rename_log(args.logdir, 'hostapd', name, hapd)
+            if hapd:
+                del hapd
+                hapd = None
 
             wt = Wlantest()
             rename_log(args.logdir, 'hwsim0.pcapng', name, wt)
             rename_log(args.logdir, 'hwsim0', name, wt)
+            if os.path.exists(os.path.join(args.logdir, 'fst-wpa_supplicant')):
+                rename_log(args.logdir, 'fst-wpa_supplicant', name, None)
+            if os.path.exists(os.path.join(args.logdir, 'fst-hostapd')):
+                rename_log(args.logdir, 'fst-hostapd', name, None)
 
         end = datetime.now()
         diff = end - start

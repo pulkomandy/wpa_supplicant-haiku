@@ -55,7 +55,7 @@ def test_wifi_display(dev):
         raise Exception("Could not fetch back configured subelement")
 
     dev[0].p2p_listen()
-    if "FAIL" in dev[1].request("P2P_SERV_DISC_REQ " + dev[0].p2p_dev_addr() + " wifi-display [source][pri-sink] 2,3,4,5"):
+    if "FAIL" in dev[1].global_request("P2P_SERV_DISC_REQ " + dev[0].p2p_dev_addr() + " wifi-display [source][pri-sink] 2,3,4,5"):
         raise Exception("Setting SD request failed")
     dev[1].p2p_find(social=True)
     ev = dev[0].wait_global_event(["P2P-SERV-DISC-REQ"], timeout=10)
@@ -101,7 +101,8 @@ def test_wifi_display(dev):
 
     pin = dev[0].wps_read_pin()
     dev[0].p2p_go_neg_auth(dev[1].p2p_dev_addr(), pin, 'display')
-    res1 = dev[1].p2p_go_neg_init(dev[0].p2p_dev_addr(), pin, 'enter', timeout=20, go_intent=15)
+    res1 = dev[1].p2p_go_neg_init(dev[0].p2p_dev_addr(), pin, 'enter',
+                                  timeout=20, go_intent=15, freq=2437)
     res2 = dev[0].p2p_go_neg_auth_result()
 
     bss = dev[0].get_bss("p2p_dev_addr=" + dev[1].p2p_dev_addr())
@@ -120,11 +121,11 @@ def test_wifi_display(dev):
     dev[2].request("SET wifi_display 1")
     dev[2].request("WFD_SUBELEM_SET 0 0006" + wfd_devinfo3)
     dev[2].p2p_find(social=True)
-    ev = dev[2].wait_event(["P2P-DEVICE-FOUND"], timeout=5)
+    ev = dev[2].wait_global_event(["P2P-DEVICE-FOUND"], timeout=5)
     if ev is None:
         raise Exception("Device discovery timed out")
     if dev[1].p2p_dev_addr() not in ev:
-        ev = dev[2].wait_event(["P2P-DEVICE-FOUND"], timeout=5)
+        ev = dev[2].wait_global_event(["P2P-DEVICE-FOUND"], timeout=5)
         if ev is None:
             raise Exception("Device discovery timed out")
         if dev[1].p2p_dev_addr() not in ev:
@@ -267,13 +268,18 @@ def test_wifi_display_persistent_group(dev):
 
         dev[0].dump_monitor()
         dev[1].dump_monitor()
-        networks = dev[0].list_networks()
+        networks = dev[0].list_networks(p2p=True)
         if len(networks) != 1:
             raise Exception("Unexpected number of networks")
         if "[P2P-PERSISTENT]" not in networks[0]['flags']:
             raise Exception("Not the persistent group data")
         if "OK" not in dev[0].global_request("P2P_GROUP_ADD persistent=" + networks[0]['id'] + " freq=" + listen_freq):
             raise Exception("Could not start GO")
+        ev = dev[0].wait_global_event(["P2P-GROUP-STARTED"], timeout=2)
+        if ev is None:
+            raise Exception("GO start up timed out")
+        dev[0].group_form_result(ev)
+
         connect_cli(dev[0], dev[2], social=True, freq=listen_freq)
         dev[0].dump_monitor()
         dev[1].dump_monitor()
@@ -281,6 +287,8 @@ def test_wifi_display_persistent_group(dev):
         ev = dev[1].wait_global_event(["P2P-GROUP-STARTED"], timeout=30)
         if ev is None:
             raise Exception("Timeout on group re-invocation (on client)")
+        dev[1].group_form_result(ev)
+
         ev = dev[0].wait_global_event(["P2P-GROUP-STARTED"], timeout=0.1)
         if ev is not None:
             raise Exception("Unexpected P2P-GROUP-START on GO")

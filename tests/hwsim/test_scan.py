@@ -12,7 +12,7 @@ import subprocess
 
 import hostapd
 from wpasupplicant import WpaSupplicant
-from utils import HwsimSkip
+from utils import HwsimSkip, fail_test
 from tshark import run_tshark
 
 def check_scan(dev, params, other_started=False, test_busy=False):
@@ -85,6 +85,30 @@ def test_scan(dev, apdev):
 
     logger.info("Active single-channel scan on AP's operating channel")
     check_scan_retry(dev[0], "freq=2412 passive=0 use_id=1", bssid)
+
+def test_scan_tsf(dev, apdev):
+    """Scan and TSF updates from Beacon/Probe Response frames"""
+    hostapd.add_ap(apdev[0]['ifname'], { "ssid": "test-scan",
+                                         'beacon_int': "100" })
+    bssid = apdev[0]['bssid']
+
+    tsf = []
+    for passive in [ 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1 ]:
+        check_scan(dev[0], "freq=2412 passive=%d use_id=1" % passive)
+        bss = dev[0].get_bss(bssid)
+        if bss:
+            tsf.append(int(bss['tsf']))
+            logger.info("TSF: " + bss['tsf'])
+    if tsf[-3] <= tsf[-4]:
+        # For now, only write this in the log without failing the test case
+        # since mac80211_hwsim does not yet update the Timestamp field in
+        # Probe Response frames.
+        logger.info("Probe Response did not update TSF")
+        #raise Exception("Probe Response did not update TSF")
+    if tsf[-1] <= tsf[-3]:
+        raise Exception("Beacon did not update TSF")
+    if 0 in tsf:
+        raise Exception("0 TSF reported")
 
 def test_scan_only(dev, apdev):
     """Control interface behavior on scan parameters with type=only"""
@@ -539,6 +563,10 @@ def test_scan_and_bss_entry_removed(dev, apdev):
 
     dev[0].wait_connected(timeout=15, error="No connection (sme-connect)")
     wpas.wait_connected(timeout=15, error="No connection (connect)")
+    dev[0].request("DISCONNECT")
+    wpas.request("DISCONNECT")
+    dev[0].flush_scan_cache()
+    wpas.flush_scan_cache()
 
 def test_scan_reqs_with_non_scan_radio_work(dev, apdev):
     """SCAN commands while non-scan radio_work is in progress"""
@@ -777,3 +805,103 @@ def test_scan_trigger_failure(dev, apdev):
     if dev[0].get_status_field('wpa_state') != "COMPLETED":
         raise Exception("wpa_state COMPLETED not restored")
     dev[0].request("SET test_failure 0")
+
+def test_scan_specify_ssid(dev, apdev):
+    """Control interface behavior on scan SSID parameter"""
+    dev[0].flush_scan_cache()
+    hapd = hostapd.add_ap(apdev[0]['ifname'], { "ssid": "test-hidden",
+                                                "ignore_broadcast_ssid": "1" })
+    bssid = apdev[0]['bssid']
+    check_scan(dev[0], "freq=2412 use_id=1 ssid 414243")
+    bss = dev[0].get_bss(bssid)
+    if bss is not None and bss['ssid'] == 'test-hidden':
+        raise Exception("BSS entry for hidden AP present unexpectedly")
+    check_scan(dev[0], "freq=2412 ssid 414243 ssid 746573742d68696464656e ssid 616263313233 use_id=1")
+    bss = dev[0].get_bss(bssid)
+    if bss is None:
+        raise Exception("BSS entry for hidden AP not found")
+    if 'test-hidden' not in dev[0].request("SCAN_RESULTS"):
+        raise Exception("Expected SSID not included in the scan results");
+
+    hapd.disable()
+    dev[0].flush_scan_cache(freq=2432)
+    dev[0].flush_scan_cache()
+
+    if "FAIL" not in dev[0].request("SCAN ssid foo"):
+        raise Exception("Invalid SCAN command accepted")
+
+def test_scan_ap_scan_2_ap_mode(dev, apdev):
+    """AP_SCAN 2 AP mode and scan()"""
+    try:
+        _test_scan_ap_scan_2_ap_mode(dev, apdev)
+    finally:
+        dev[0].request("AP_SCAN 1")
+
+def _test_scan_ap_scan_2_ap_mode(dev, apdev):
+    if "OK" not in dev[0].request("AP_SCAN 2"):
+        raise Exception("Failed to set AP_SCAN 2")
+
+    id = dev[0].add_network()
+    dev[0].set_network(id, "mode", "2")
+    dev[0].set_network_quoted(id, "ssid", "wpas-ap-open")
+    dev[0].set_network(id, "key_mgmt", "NONE")
+    dev[0].set_network(id, "frequency", "2412")
+    dev[0].set_network(id, "scan_freq", "2412")
+    dev[0].set_network(id, "disabled", "0")
+    dev[0].select_network(id)
+    ev = dev[0].wait_event(["CTRL-EVENT-CONNECTED"], timeout=5)
+    if ev is None:
+        raise Exception("AP failed to start")
+
+    with fail_test(dev[0], 1, "wpa_driver_nl80211_scan"):
+        if "OK" not in dev[0].request("SCAN freq=2412"):
+            raise Exception("SCAN command failed unexpectedly")
+        ev = dev[0].wait_event(["CTRL-EVENT-SCAN-FAILED",
+                                "AP-DISABLED"], timeout=5)
+        if ev is None:
+            raise Exception("CTRL-EVENT-SCAN-FAILED not seen")
+        if "AP-DISABLED" in ev:
+            raise Exception("Unexpected AP-DISABLED event")
+        if "retry=1" in ev:
+            # Wait for the retry to scan happen
+            ev = dev[0].wait_event(["CTRL-EVENT-SCAN-FAILED",
+                                    "AP-DISABLED"], timeout=5)
+            if ev is None:
+                raise Exception("CTRL-EVENT-SCAN-FAILED not seen - retry")
+            if "AP-DISABLED" in ev:
+                raise Exception("Unexpected AP-DISABLED event - retry")
+
+    dev[1].connect("wpas-ap-open", key_mgmt="NONE", scan_freq="2412")
+    dev[1].request("DISCONNECT")
+    dev[1].wait_disconnected()
+    dev[0].request("DISCONNECT")
+    dev[0].wait_disconnected()
+
+def test_scan_bss_expiration_on_ssid_change(dev, apdev):
+    """BSS entry expiration when AP changes SSID"""
+    dev[0].flush_scan_cache()
+    hapd = hostapd.add_ap(apdev[0]['ifname'], { "ssid": "test-scan" })
+    bssid = apdev[0]['bssid']
+    dev[0].scan_for_bss(apdev[0]['bssid'], freq="2412")
+
+    hapd.request("DISABLE")
+    hapd = hostapd.add_ap(apdev[0]['ifname'], { "ssid": "open" })
+    if "OK" not in dev[0].request("BSS_EXPIRE_COUNT 3"):
+        raise Exception("BSS_EXPIRE_COUNT failed")
+    dev[0].scan(freq="2412")
+    dev[0].scan(freq="2412")
+    if "OK" not in dev[0].request("BSS_EXPIRE_COUNT 2"):
+        raise Exception("BSS_EXPIRE_COUNT failed")
+    res = dev[0].request("SCAN_RESULTS")
+    if "test-scan" not in res:
+        raise Exception("The first SSID not in scan results")
+    if "open" not in res:
+        raise Exception("The second SSID not in scan results")
+    dev[0].connect("open", key_mgmt="NONE")
+
+    dev[0].request("BSS_FLUSH 0")
+    res = dev[0].request("SCAN_RESULTS")
+    if "test-scan" in res:
+        raise Exception("The BSS entry with the old SSID was not removed")
+    dev[0].request("DISCONNECT")
+    dev[0].wait_disconnected()

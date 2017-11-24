@@ -15,7 +15,7 @@ import os
 
 import hwsim_utils
 import hostapd
-from utils import HwsimSkip, alloc_fail
+from utils import HwsimSkip, alloc_fail, fail_test, skip_with_fips
 from wpasupplicant import WpaSupplicant
 from test_ap_psk import check_mib, find_wpas_process, read_process_memory, verify_not_present, get_key_locations
 
@@ -48,6 +48,11 @@ def check_cert_probe_support(dev):
     if not tls.startswith("OpenSSL"):
         raise HwsimSkip("Certificate probing not supported with this TLS library: " + tls)
 
+def check_ocsp_support(dev):
+    tls = dev.request("GET tls_library")
+    if "BoringSSL" in tls:
+        raise HwsimSkip("OCSP not supported with this TLS library: " + tls)
+
 def read_pem(fname):
     with open(fname, "r") as f:
         lines = f.readlines()
@@ -64,7 +69,7 @@ def read_pem(fname):
 
 def eap_connect(dev, ap, method, identity,
                 sha256=False, expect_failure=False, local_error_report=False,
-                **kwargs):
+                maybe_local_error=False, **kwargs):
     hapd = hostapd.Hostapd(ap['ifname'])
     id = dev.connect("test-wpa2-eap", key_mgmt="WPA-EAP WPA-EAP-SHA256",
                      eap=method, identity=identity,
@@ -72,7 +77,8 @@ def eap_connect(dev, ap, method, identity,
                      **kwargs)
     eap_check_auth(dev, method, True, sha256=sha256,
                    expect_failure=expect_failure,
-                   local_error_report=local_error_report)
+                   local_error_report=local_error_report,
+                   maybe_local_error=maybe_local_error)
     if expect_failure:
         return id
     ev = hapd.wait_event([ "AP-STA-CONNECTED" ], timeout=5)
@@ -81,13 +87,19 @@ def eap_connect(dev, ap, method, identity,
     return id
 
 def eap_check_auth(dev, method, initial, rsn=True, sha256=False,
-                   expect_failure=False, local_error_report=False):
+                   expect_failure=False, local_error_report=False,
+                   maybe_local_error=False):
     ev = dev.wait_event(["CTRL-EVENT-EAP-STARTED"], timeout=10)
     if ev is None:
         raise Exception("Association and EAP start timed out")
-    ev = dev.wait_event(["CTRL-EVENT-EAP-METHOD"], timeout=10)
+    ev = dev.wait_event(["CTRL-EVENT-EAP-METHOD",
+                         "CTRL-EVENT-EAP-FAILURE"], timeout=10)
     if ev is None:
         raise Exception("EAP method selection timed out")
+    if "CTRL-EVENT-EAP-FAILURE" in ev:
+        if maybe_local_error:
+            return
+        raise Exception("Could not select EAP method")
     if method not in ev:
         raise Exception("Unexpected EAP method")
     if expect_failure:
@@ -95,6 +107,8 @@ def eap_check_auth(dev, method, initial, rsn=True, sha256=False,
         if ev is None:
             raise Exception("EAP failure timed out")
         ev = dev.wait_disconnected(timeout=10)
+        if maybe_local_error and "locally_generated=1" in ev:
+            return
         if not local_error_report:
             if "reason=23" not in ev:
                 raise Exception("Proper reason code for disconnection not reported")
@@ -414,6 +428,34 @@ def _test_ap_wpa2_eap_sim_ext(dev, apdev):
     ev = dev[0].wait_event(["CTRL-EVENT-EAP-FAILURE"], timeout=15)
     if ev is None:
         raise Exception("EAP failure not reported")
+
+def test_ap_wpa2_eap_sim_oom(dev, apdev):
+    """EAP-SIM and OOM"""
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    hostapd.add_ap(apdev[0]['ifname'], params)
+    tests = [ (1, "milenage_f2345"),
+              (2, "milenage_f2345"),
+              (3, "milenage_f2345"),
+              (4, "milenage_f2345"),
+              (5, "milenage_f2345"),
+              (6, "milenage_f2345"),
+              (7, "milenage_f2345"),
+              (8, "milenage_f2345"),
+              (9, "milenage_f2345"),
+              (10, "milenage_f2345"),
+              (11, "milenage_f2345"),
+              (12, "milenage_f2345") ]
+    for count, func in tests:
+        with alloc_fail(dev[0], count, func):
+            dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="SIM",
+                           identity="1232010000000000",
+                           password="90dca4eda45b53cf0f12d7c9c3bc6a89:cb9cccc4b9258e6dca4760379fb82581",
+                           wait_connect=False, scan_freq="2412")
+            ev = dev[0].wait_event(["CTRL-EVENT-EAP-METHOD"], timeout=5)
+            if ev is None:
+                raise Exception("EAP method not selected")
+            dev[0].wait_disconnected()
+            dev[0].request("REMOVE_NETWORK all")
 
 def test_ap_wpa2_eap_aka(dev, apdev):
     """WPA2-Enterprise connection using EAP-AKA"""
@@ -752,6 +794,7 @@ def test_ap_wpa2_eap_ttls_pap_incorrect_password(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_chap(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/CHAP"""
+    skip_with_fips(dev[0])
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     eap_connect(dev[0], apdev[0], "TTLS", "chap user",
@@ -762,6 +805,7 @@ def test_ap_wpa2_eap_ttls_chap(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_chap_altsubject_match(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/CHAP"""
+    skip_with_fips(dev[0])
     check_altsubject_match_support(dev[0])
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
@@ -773,6 +817,7 @@ def test_ap_wpa2_eap_ttls_chap_altsubject_match(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_chap_incorrect_password(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/CHAP - incorrect password"""
+    skip_with_fips(dev[0])
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     eap_connect(dev[0], apdev[0], "TTLS", "chap user",
@@ -786,6 +831,7 @@ def test_ap_wpa2_eap_ttls_chap_incorrect_password(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_mschap(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/MSCHAP"""
+    skip_with_fips(dev[0])
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     eap_connect(dev[0], apdev[0], "TTLS", "mschap user",
@@ -801,7 +847,8 @@ def test_ap_wpa2_eap_ttls_mschap(dev, apdev):
                 fragment_size="200")
 
 def test_ap_wpa2_eap_ttls_mschap_incorrect_password(dev, apdev):
-    """WPA2-Enterprise connection using EAP-TTLS/CHAP - incorrect password"""
+    """WPA2-Enterprise connection using EAP-TTLS/MSCHAP - incorrect password"""
+    skip_with_fips(dev[0])
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     eap_connect(dev[0], apdev[0], "TTLS", "mschap user",
@@ -819,6 +866,7 @@ def test_ap_wpa2_eap_ttls_mschap_incorrect_password(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_mschapv2(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/MSCHAPv2"""
+    check_eap_capa(dev[0], "MSCHAPV2")
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hostapd.add_ap(apdev[0]['ifname'], params)
     hapd = hostapd.Hostapd(apdev[0]['ifname'])
@@ -849,6 +897,7 @@ def test_ap_wpa2_eap_ttls_mschapv2(dev, apdev):
 def test_ap_wpa2_eap_ttls_mschapv2_suffix_match(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/MSCHAPv2"""
     check_domain_match_full(dev[0])
+    skip_with_fips(dev[0])
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hostapd.add_ap(apdev[0]['ifname'], params)
     hapd = hostapd.Hostapd(apdev[0]['ifname'])
@@ -861,6 +910,7 @@ def test_ap_wpa2_eap_ttls_mschapv2_suffix_match(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_mschapv2_domain_match(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/MSCHAPv2 (domain_match)"""
+    skip_with_fips(dev[0])
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hostapd.add_ap(apdev[0]['ifname'], params)
     hapd = hostapd.Hostapd(apdev[0]['ifname'])
@@ -873,6 +923,7 @@ def test_ap_wpa2_eap_ttls_mschapv2_domain_match(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_mschapv2_incorrect_password(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/MSCHAPv2 - incorrect password"""
+    skip_with_fips(dev[0])
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     eap_connect(dev[0], apdev[0], "TTLS", "DOMAIN\mschapv2 user",
@@ -886,6 +937,7 @@ def test_ap_wpa2_eap_ttls_mschapv2_incorrect_password(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_mschapv2_utf8(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/MSCHAPv2 and UTF-8 password"""
+    skip_with_fips(dev[0])
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hostapd.add_ap(apdev[0]['ifname'], params)
     hapd = hostapd.Hostapd(apdev[0]['ifname'])
@@ -951,6 +1003,7 @@ def test_ap_wpa2_eap_ttls_eap_gtc_server_oom(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_eap_md5(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/EAP-MD5"""
+    check_eap_capa(dev[0], "MD5")
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     eap_connect(dev[0], apdev[0], "TTLS", "user",
@@ -961,6 +1014,7 @@ def test_ap_wpa2_eap_ttls_eap_md5(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_eap_md5_incorrect_password(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/EAP-MD5 - incorrect password"""
+    check_eap_capa(dev[0], "MD5")
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     eap_connect(dev[0], apdev[0], "TTLS", "user",
@@ -970,6 +1024,7 @@ def test_ap_wpa2_eap_ttls_eap_md5_incorrect_password(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_eap_md5_no_password(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/EAP-MD5 - no password"""
+    check_eap_capa(dev[0], "MD5")
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     eap_connect(dev[0], apdev[0], "TTLS", "user-no-passwd",
@@ -979,6 +1034,7 @@ def test_ap_wpa2_eap_ttls_eap_md5_no_password(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_eap_md5_server_oom(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/EAP-MD5 - server OOM"""
+    check_eap_capa(dev[0], "MD5")
     params = int_eap_server_params()
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     with alloc_fail(hapd, 1, "eap_md5_init"):
@@ -1003,6 +1059,7 @@ def test_ap_wpa2_eap_ttls_eap_md5_server_oom(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_eap_mschapv2(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/EAP-MSCHAPv2"""
+    check_eap_capa(dev[0], "MSCHAPV2")
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     eap_connect(dev[0], apdev[0], "TTLS", "user",
@@ -1020,6 +1077,7 @@ def test_ap_wpa2_eap_ttls_eap_mschapv2(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_eap_mschapv2_no_password(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/EAP-MSCHAPv2 - no password"""
+    check_eap_capa(dev[0], "MSCHAPV2")
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     eap_connect(dev[0], apdev[0], "TTLS", "user-no-passwd",
@@ -1029,6 +1087,7 @@ def test_ap_wpa2_eap_ttls_eap_mschapv2_no_password(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_eap_mschapv2_server_oom(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/EAP-MSCHAPv2 - server OOM"""
+    check_eap_capa(dev[0], "MSCHAPV2")
     params = int_eap_server_params()
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     with alloc_fail(hapd, 1, "eap_mschapv2_init"):
@@ -1112,6 +1171,7 @@ def test_ap_wpa2_eap_fast_eap_aka(dev, apdev):
 
 def test_ap_wpa2_eap_peap_eap_mschapv2(dev, apdev):
     """WPA2-Enterprise connection using EAP-PEAP/EAP-MSCHAPv2"""
+    check_eap_capa(dev[0], "MSCHAPV2")
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     eap_connect(dev[0], apdev[0], "PEAP", "user",
@@ -1139,8 +1199,20 @@ def test_ap_wpa2_eap_peap_eap_mschapv2(dev, apdev):
                 ca_cert="auth_serv/ca.pem", phase2="auth=MSCHAPV2",
                 expect_failure=True)
 
+def test_ap_wpa2_eap_peap_eap_mschapv2_domain(dev, apdev):
+    """WPA2-Enterprise connection using EAP-PEAP/EAP-MSCHAPv2 with domain"""
+    check_eap_capa(dev[0], "MSCHAPV2")
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    eap_connect(dev[0], apdev[0], "PEAP", "DOMAIN\user3",
+                anonymous_identity="peap", password="password",
+                ca_cert="auth_serv/ca.pem", phase2="auth=MSCHAPV2")
+    hwsim_utils.test_connectivity(dev[0], hapd)
+    eap_reauth(dev[0], "PEAP")
+
 def test_ap_wpa2_eap_peap_eap_mschapv2_incorrect_password(dev, apdev):
     """WPA2-Enterprise connection using EAP-PEAP/EAP-MSCHAPv2 - incorrect password"""
+    check_eap_capa(dev[0], "MSCHAPV2")
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     eap_connect(dev[0], apdev[0], "PEAP", "user",
@@ -1150,6 +1222,7 @@ def test_ap_wpa2_eap_peap_eap_mschapv2_incorrect_password(dev, apdev):
 
 def test_ap_wpa2_eap_peap_crypto_binding(dev, apdev):
     """WPA2-Enterprise connection using EAP-PEAPv0/EAP-MSCHAPv2 and crypto binding"""
+    check_eap_capa(dev[0], "MSCHAPV2")
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     eap_connect(dev[0], apdev[0], "PEAP", "user", password="password",
@@ -1170,6 +1243,7 @@ def test_ap_wpa2_eap_peap_crypto_binding(dev, apdev):
 
 def test_ap_wpa2_eap_peap_crypto_binding_server_oom(dev, apdev):
     """WPA2-Enterprise connection using EAP-PEAPv0/EAP-MSCHAPv2 and crypto binding with server OOM"""
+    check_eap_capa(dev[0], "MSCHAPV2")
     params = int_eap_server_params()
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     with alloc_fail(hapd, 1, "eap_mschapv2_getKey"):
@@ -1181,6 +1255,7 @@ def test_ap_wpa2_eap_peap_crypto_binding_server_oom(dev, apdev):
 
 def test_ap_wpa2_eap_peap_params(dev, apdev):
     """WPA2-Enterprise connection using EAP-PEAPv0/EAP-MSCHAPv2 and various parameters"""
+    check_eap_capa(dev[0], "MSCHAPV2")
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hostapd.add_ap(apdev[0]['ifname'], params)
     eap_connect(dev[0], apdev[0], "PEAP", "user",
@@ -1255,6 +1330,8 @@ def test_ap_wpa2_eap_tls_pkcs12(dev, apdev):
                 private_key="auth_serv/user.pkcs12",
                 private_key_passwd="whatever")
     dev[0].request("REMOVE_NETWORK all")
+    dev[0].wait_disconnected()
+
     dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="TLS",
                    identity="tls user",
                    ca_cert="auth_serv/ca.pem",
@@ -1266,6 +1343,21 @@ def test_ap_wpa2_eap_tls_pkcs12(dev, apdev):
     id = ev.split(':')[0].split('-')[-1]
     dev[0].request("CTRL-RSP-PASSPHRASE-" + id + ":whatever")
     dev[0].wait_connected(timeout=10)
+    dev[0].request("REMOVE_NETWORK all")
+    dev[0].wait_disconnected()
+
+    # Run this twice to verify certificate chain handling with OpenSSL. Use two
+    # different files to cover both cases of the extra certificate being the
+    # one that signed the client certificate and it being unrelated to the
+    # client certificate.
+    for pkcs12 in "auth_serv/user2.pkcs12", "auth_serv/user3.pkcs12":
+        for i in range(2):
+            eap_connect(dev[0], apdev[0], "TLS", "tls user",
+                        ca_cert="auth_serv/ca.pem",
+                        private_key=pkcs12,
+                        private_key_passwd="whatever")
+            dev[0].request("REMOVE_NETWORK all")
+            dev[0].wait_disconnected()
 
 def test_ap_wpa2_eap_tls_pkcs12_blob(dev, apdev):
     """WPA2-Enterprise connection using EAP-TLS and PKCS#12 from configuration blob"""
@@ -1283,6 +1375,7 @@ def test_ap_wpa2_eap_tls_pkcs12_blob(dev, apdev):
 
 def test_ap_wpa2_eap_tls_neg_incorrect_trust_root(dev, apdev):
     """WPA2-Enterprise negative test - incorrect trust root"""
+    check_eap_capa(dev[0], "MSCHAPV2")
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hostapd.add_ap(apdev[0]['ifname'], params)
     cert = read_pem("auth_serv/ca-incorrect.pem")
@@ -1666,6 +1759,7 @@ def test_ap_wpa2_eap_unauth_tls(dev, apdev):
 def test_ap_wpa2_eap_ttls_server_cert_hash(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS and server certificate hash"""
     check_cert_probe_support(dev[0])
+    skip_with_fips(dev[0])
     srv_cert_hash = "1477c9cd88391609444b83eca45c4f9f324e3051c5c31fc233ac6aede30ce7cd"
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hostapd.add_ap(apdev[0]['ifname'], params)
@@ -1759,9 +1853,23 @@ def test_ap_wpa2_eap_pwd(dev, apdev):
                 password="secret password",
                 fragment_size="31")
 
+def test_ap_wpa2_eap_pwd_nthash(dev, apdev):
+    """WPA2-Enterprise connection using EAP-pwd and NTHash"""
+    check_eap_capa(dev[0], "PWD")
+    skip_with_fips(dev[0])
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    hostapd.add_ap(apdev[0]['ifname'], params)
+    eap_connect(dev[0], apdev[0], "PWD", "pwd-hash", password="secret password")
+    eap_connect(dev[1], apdev[0], "PWD", "pwd-hash",
+                password_hex="hash:e3718ece8ab74792cbbfffd316d2d19a")
+    eap_connect(dev[2], apdev[0], "PWD", "pwd user",
+                password_hex="hash:e3718ece8ab74792cbbfffd316d2d19a",
+                expect_failure=True, local_error_report=True)
+
 def test_ap_wpa2_eap_pwd_groups(dev, apdev):
     """WPA2-Enterprise connection using various EAP-pwd groups"""
     check_eap_capa(dev[0], "PWD")
+    tls = dev[0].request("GET tls_library")
     params = { "ssid": "test-wpa2-eap", "wpa": "2", "wpa_key_mgmt": "WPA-EAP",
                "rsn_pairwise": "CCMP", "ieee8021x": "1",
                "eap_server": "1", "eap_user_file": "auth_serv/eap_user.conf" }
@@ -1769,7 +1877,16 @@ def test_ap_wpa2_eap_pwd_groups(dev, apdev):
         params['pwd_group'] = str(i)
         hostapd.add_ap(apdev[0]['ifname'], params)
         dev[0].request("REMOVE_NETWORK all")
-        eap_connect(dev[0], apdev[0], "PWD", "pwd user", password="secret password")
+        try:
+            eap_connect(dev[0], apdev[0], "PWD", "pwd user",
+                        password="secret password")
+        except:
+            if "BoringSSL" in tls and i in [ 25 ]:
+                logger.info("Ignore connection failure with group %d with BoringSSL" % i)
+                dev[0].request("DISCONNECT")
+                time.sleep(0.1)
+                continue
+            raise
 
 def test_ap_wpa2_eap_pwd_invalid_group(dev, apdev):
     """WPA2-Enterprise connection using invalid EAP-pwd group"""
@@ -1868,8 +1985,80 @@ def test_ap_wpa2_eap_eke(dev, apdev):
     eap_connect(dev[0], apdev[0], "EKE", "eke user", password="hello1",
                 expect_failure=True)
 
+def test_ap_wpa2_eap_eke_serverid_nai(dev, apdev):
+    """WPA2-Enterprise connection using EAP-EKE with serverid NAI"""
+    params = int_eap_server_params()
+    params['server_id'] = 'example.server@w1.fi'
+    hostapd.add_ap(apdev[0]['ifname'], params)
+    eap_connect(dev[0], apdev[0], "EKE", "eke user", password="hello")
+
+def test_ap_wpa2_eap_eke_server_oom(dev, apdev):
+    """WPA2-Enterprise connection using EAP-EKE with server OOM"""
+    params = int_eap_server_params()
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    dev[0].scan_for_bss(apdev[0]['bssid'], freq=2412)
+
+    for count,func in [ (1, "eap_eke_build_commit"),
+                        (2, "eap_eke_build_commit"),
+                        (3, "eap_eke_build_commit"),
+                        (1, "eap_eke_build_confirm"),
+                        (2, "eap_eke_build_confirm"),
+                        (1, "eap_eke_process_commit"),
+                        (2, "eap_eke_process_commit"),
+                        (1, "eap_eke_process_confirm"),
+                        (1, "eap_eke_process_identity"),
+                        (2, "eap_eke_process_identity"),
+                        (3, "eap_eke_process_identity"),
+                        (4, "eap_eke_process_identity") ]:
+        with alloc_fail(hapd, count, func):
+            eap_connect(dev[0], apdev[0], "EKE", "eke user", password="hello",
+                        expect_failure=True)
+            dev[0].request("REMOVE_NETWORK all")
+
+    for count,func,pw in [ (1, "eap_eke_init", "hello"),
+                           (1, "eap_eke_get_session_id", "hello"),
+                           (1, "eap_eke_getKey", "hello"),
+                           (1, "eap_eke_build_msg", "hello"),
+                           (1, "eap_eke_build_failure", "wrong"),
+                           (1, "eap_eke_build_identity", "hello"),
+                           (2, "eap_eke_build_identity", "hello") ]:
+        with alloc_fail(hapd, count, func):
+            dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP WPA-EAP-SHA256",
+                           eap="EKE", identity="eke user", password=pw,
+                           wait_connect=False, scan_freq="2412")
+            # This would eventually time out, but we can stop after having
+            # reached the allocation failure.
+            for i in range(20):
+                time.sleep(0.1)
+                if hapd.request("GET_ALLOC_FAIL").startswith('0'):
+                    break
+            dev[0].request("REMOVE_NETWORK all")
+
+    for count in range(1, 1000):
+        try:
+            with alloc_fail(hapd, count, "eap_server_sm_step"):
+                dev[0].connect("test-wpa2-eap",
+                               key_mgmt="WPA-EAP WPA-EAP-SHA256",
+                               eap="EKE", identity="eke user", password=pw,
+                               wait_connect=False, scan_freq="2412")
+                # This would eventually time out, but we can stop after having
+                # reached the allocation failure.
+                for i in range(10):
+                    time.sleep(0.1)
+                    if hapd.request("GET_ALLOC_FAIL").startswith('0'):
+                        break
+                dev[0].request("REMOVE_NETWORK all")
+        except Exception, e:
+            if str(e) == "Allocation failure did not trigger":
+                if count < 30:
+                    raise Exception("Too few allocation failures")
+                logger.info("%d allocation failures tested" % (count - 1))
+                break
+            raise e
+
 def test_ap_wpa2_eap_ikev2(dev, apdev):
     """WPA2-Enterprise connection using EAP-IKEv2"""
+    check_eap_capa(dev[0], "IKEV2")
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hostapd.add_ap(apdev[0]['ifname'], params)
     eap_connect(dev[0], apdev[0], "IKEV2", "ikev2 user",
@@ -1886,6 +2075,7 @@ def test_ap_wpa2_eap_ikev2(dev, apdev):
 
 def test_ap_wpa2_eap_ikev2_as_frag(dev, apdev):
     """WPA2-Enterprise connection using EAP-IKEv2 with server fragmentation"""
+    check_eap_capa(dev[0], "IKEV2")
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     params = { "ssid": "test-wpa2-eap", "wpa": "2", "wpa_key_mgmt": "WPA-EAP",
                "rsn_pairwise": "CCMP", "ieee8021x": "1",
@@ -1895,6 +2085,44 @@ def test_ap_wpa2_eap_ikev2_as_frag(dev, apdev):
     eap_connect(dev[0], apdev[0], "IKEV2", "ikev2 user",
                 password="ike password")
     eap_reauth(dev[0], "IKEV2")
+
+def test_ap_wpa2_eap_ikev2_oom(dev, apdev):
+    """WPA2-Enterprise connection using EAP-IKEv2 and OOM"""
+    check_eap_capa(dev[0], "IKEV2")
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    hostapd.add_ap(apdev[0]['ifname'], params)
+
+    tests = [ (1, "dh_init"),
+              (2, "dh_init"),
+              (1, "dh_derive_shared") ]
+    for count, func in tests:
+        with alloc_fail(dev[0], count, func):
+            dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="IKEV2",
+                           identity="ikev2 user", password="ike password",
+                           wait_connect=False, scan_freq="2412")
+            ev = dev[0].wait_event(["CTRL-EVENT-EAP-METHOD"], timeout=5)
+            if ev is None:
+                raise Exception("EAP method not selected")
+            for i in range(10):
+                if "0:" in dev[0].request("GET_ALLOC_FAIL"):
+                    break
+                time.sleep(0.02)
+            dev[0].request("REMOVE_NETWORK all")
+
+    tests = [ (1, "os_get_random;dh_init") ]
+    for count, func in tests:
+        with fail_test(dev[0], count, func):
+            dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="IKEV2",
+                           identity="ikev2 user", password="ike password",
+                           wait_connect=False, scan_freq="2412")
+            ev = dev[0].wait_event(["CTRL-EVENT-EAP-METHOD"], timeout=5)
+            if ev is None:
+                raise Exception("EAP method not selected")
+            for i in range(10):
+                if "0:" in dev[0].request("GET_FAIL"):
+                    break
+                time.sleep(0.02)
+            dev[0].request("REMOVE_NETWORK all")
 
 def test_ap_wpa2_eap_pax(dev, apdev):
     """WPA2-Enterprise connection using EAP-PAX"""
@@ -1934,8 +2162,50 @@ def test_ap_wpa2_eap_psk(dev, apdev):
                 password_hex="ff23456789abcdef0123456789abcdef", sha256=True,
                 expect_failure=True)
 
+def test_ap_wpa2_eap_psk_oom(dev, apdev):
+    """WPA2-Enterprise connection using EAP-PSK and OOM"""
+    skip_with_fips(dev[0])
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    hostapd.add_ap(apdev[0]['ifname'], params)
+    tests = [ (1, "aes_128_ctr_encrypt;aes_128_eax_encrypt"),
+              (1, "omac1_aes_128;aes_128_eax_encrypt"),
+              (2, "omac1_aes_128;aes_128_eax_encrypt"),
+              (3, "omac1_aes_128;aes_128_eax_encrypt"),
+              (1, "=aes_128_eax_encrypt"),
+              (1, "omac1_aes_vector"),
+              (1, "aes_128_ctr_encrypt;aes_128_eax_decrypt"),
+              (1, "omac1_aes_128;aes_128_eax_decrypt"),
+              (2, "omac1_aes_128;aes_128_eax_decrypt"),
+              (3, "omac1_aes_128;aes_128_eax_decrypt"),
+              (1, "=aes_128_eax_decrypt") ]
+    for count, func in tests:
+        with alloc_fail(dev[0], count, func):
+            dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="PSK",
+                           identity="psk.user@example.com",
+                           password_hex="0123456789abcdef0123456789abcdef",
+                           wait_connect=False, scan_freq="2412")
+            ev = dev[0].wait_event(["CTRL-EVENT-EAP-METHOD"], timeout=5)
+            if ev is None:
+                raise Exception("EAP method not selected")
+            for i in range(10):
+                if "0:" in dev[0].request("GET_ALLOC_FAIL"):
+                    break
+                time.sleep(0.02)
+            dev[0].request("REMOVE_NETWORK all")
+
+    with alloc_fail(dev[0], 1, "aes_128_encrypt_block"):
+            dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="PSK",
+                           identity="psk.user@example.com",
+                           password_hex="0123456789abcdef0123456789abcdef",
+                           wait_connect=False, scan_freq="2412")
+            ev = dev[0].wait_event(["CTRL-EVENT-EAP-FAILURE"], timeout=10)
+            if ev is None:
+                raise Exception("EAP method failure not reported")
+            dev[0].request("REMOVE_NETWORK all")
+
 def test_ap_wpa_eap_peap_eap_mschapv2(dev, apdev):
     """WPA-Enterprise connection using EAP-PEAP/EAP-MSCHAPv2"""
+    check_eap_capa(dev[0], "MSCHAPV2")
     params = hostapd.wpa_eap_params(ssid="test-wpa-eap")
     hapd = hostapd.add_ap(apdev[0]['ifname'], params)
     dev[0].connect("test-wpa-eap", key_mgmt="WPA-EAP", eap="PEAP",
@@ -1959,6 +2229,7 @@ def test_ap_wpa_eap_peap_eap_mschapv2(dev, apdev):
 
 def test_ap_wpa2_eap_interactive(dev, apdev):
     """WPA2-Enterprise connection using interactive identity/password entry"""
+    check_eap_capa(dev[0], "MSCHAPV2")
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hostapd.add_ap(apdev[0]['ifname'], params)
     hapd = hostapd.Hostapd(apdev[0]['ifname'])
@@ -1997,6 +2268,36 @@ def test_ap_wpa2_eap_interactive(dev, apdev):
         dev[0].request("CTRL-RSP-" + type + "-" + id + ":" + req_pw)
         dev[0].wait_connected(timeout=10)
         dev[0].request("REMOVE_NETWORK all")
+
+def test_ap_wpa2_eap_ext_enable_network_while_connected(dev, apdev):
+    """WPA2-Enterprise interactive identity entry and ENABLE_NETWORK"""
+    check_eap_capa(dev[0], "MSCHAPV2")
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.Hostapd(apdev[0]['ifname'])
+
+    id_other = dev[0].connect("other", key_mgmt="NONE", scan_freq="2412",
+                              only_add_network=True)
+
+    req_id = "DOMAIN\mschapv2 user"
+    dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="TTLS",
+                   anonymous_identity="ttls", identity=None,
+                   password="password",
+                   ca_cert="auth_serv/ca.pem", phase2="auth=MSCHAPV2",
+                   wait_connect=False, scan_freq="2412")
+    ev = dev[0].wait_event(["CTRL-REQ-IDENTITY"])
+    if ev is None:
+        raise Exception("Request for identity timed out")
+    id = ev.split(':')[0].split('-')[-1]
+    dev[0].request("CTRL-RSP-IDENTITY-" + id + ":" + req_id)
+    dev[0].wait_connected(timeout=10)
+
+    if "OK" not in dev[0].request("ENABLE_NETWORK " + str(id_other)):
+        raise Exception("Failed to enable network")
+    ev = dev[0].wait_event(["SME: Trying to authenticate"], timeout=1)
+    if ev is not None:
+        raise Exception("Unexpected reconnection attempt on ENABLE_NETWORK")
+    dev[0].request("REMOVE_NETWORK all")
 
 def test_ap_wpa2_eap_vendor_test(dev, apdev):
     """WPA2-Enterprise connection using EAP vendor test"""
@@ -2141,8 +2442,53 @@ def test_ap_wpa2_eap_fast_gtc_identity_change(dev, apdev):
         raise Exception("EAP failure not reported")
     dev[0].wait_disconnected()
 
+def test_ap_wpa2_eap_fast_prf_oom(dev, apdev):
+    """WPA2-Enterprise connection using EAP-FAST and OOM in PRF"""
+    check_eap_capa(dev[0], "FAST")
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    with alloc_fail(dev[0], 2, "openssl_tls_prf"):
+        dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="FAST",
+                       identity="user", anonymous_identity="FAST",
+                       password="password", ca_cert="auth_serv/ca.pem",
+                       phase2="auth=GTC",
+                       phase1="fast_provisioning=2",
+                       pac_file="blob://fast_pac_auth",
+                       wait_connect=False, scan_freq="2412")
+        ev = dev[0].wait_event(["CTRL-EVENT-EAP-FAILURE"], timeout=15)
+        if ev is None:
+            raise Exception("EAP failure not reported")
+    dev[0].request("DISCONNECT")
+
+def test_ap_wpa2_eap_fast_server_oom(dev, apdev):
+    """EAP-FAST/MSCHAPv2 and server OOM"""
+    check_eap_capa(dev[0], "FAST")
+
+    params = int_eap_server_params()
+    params['dh_file'] = 'auth_serv/dh.conf'
+    params['pac_opaque_encr_key'] = '000102030405060708090a0b0c0d0e0f'
+    params['eap_fast_a_id'] = '1011'
+    params['eap_fast_a_id_info'] = 'another test server'
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+
+    with alloc_fail(hapd, 1, "tls_session_ticket_ext_cb"):
+        id = eap_connect(dev[0], apdev[0], "FAST", "user",
+                         anonymous_identity="FAST", password="password",
+                         ca_cert="auth_serv/ca.pem", phase2="auth=MSCHAPV2",
+                         phase1="fast_provisioning=1",
+                         pac_file="blob://fast_pac",
+                         expect_failure=True)
+        ev = dev[0].wait_event(["CTRL-EVENT-EAP-FAILURE"], timeout=10)
+        if ev is None:
+            raise Exception("No EAP failure reported")
+        dev[0].wait_disconnected()
+        dev[0].request("DISCONNECT")
+
+    dev[0].select_network(id, freq="2412")
+
 def test_ap_wpa2_eap_tls_ocsp(dev, apdev):
     """WPA2-Enterprise connection using EAP-TLS and verifying OCSP"""
+    check_ocsp_support(dev[0])
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hostapd.add_ap(apdev[0]['ifname'], params)
     eap_connect(dev[0], apdev[0], "TLS", "tls user", ca_cert="auth_serv/ca.pem",
@@ -2157,9 +2503,36 @@ def int_eap_server_params():
                "server_cert": "auth_serv/server.pem",
                "private_key": "auth_serv/server.key" }
     return params
-    
+
+def test_ap_wpa2_eap_tls_ocsp_invalid_data(dev, apdev):
+    """WPA2-Enterprise connection using EAP-TLS and invalid OCSP data"""
+    check_ocsp_support(dev[0])
+    params = int_eap_server_params()
+    params["ocsp_stapling_response"] = "auth_serv/ocsp-req.der"
+    hostapd.add_ap(apdev[0]['ifname'], params)
+    dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="TLS",
+                   identity="tls user", ca_cert="auth_serv/ca.pem",
+                   private_key="auth_serv/user.pkcs12",
+                   private_key_passwd="whatever", ocsp=2,
+                   wait_connect=False, scan_freq="2412")
+    count = 0
+    while True:
+        ev = dev[0].wait_event(["CTRL-EVENT-EAP-STATUS"])
+        if ev is None:
+            raise Exception("Timeout on EAP status")
+        if 'bad certificate status response' in ev:
+            break
+        count = count + 1
+        if count > 10:
+            raise Exception("Unexpected number of EAP status messages")
+
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-FAILURE"])
+    if ev is None:
+        raise Exception("Timeout on EAP failure report")
+
 def test_ap_wpa2_eap_tls_ocsp_invalid(dev, apdev):
     """WPA2-Enterprise connection using EAP-TLS and invalid OCSP response"""
+    check_ocsp_support(dev[0])
     params = int_eap_server_params()
     params["ocsp_stapling_response"] = "auth_serv/ocsp-server-cache.der-invalid"
     hostapd.add_ap(apdev[0]['ifname'], params)
@@ -2183,8 +2556,35 @@ def test_ap_wpa2_eap_tls_ocsp_invalid(dev, apdev):
     if ev is None:
         raise Exception("Timeout on EAP failure report")
 
+def test_ap_wpa2_eap_tls_ocsp_unknown_sign(dev, apdev):
+    """WPA2-Enterprise connection using EAP-TLS and unknown OCSP signer"""
+    check_ocsp_support(dev[0])
+    params = int_eap_server_params()
+    params["ocsp_stapling_response"] = "auth_serv/ocsp-server-cache.der-unknown-sign"
+    hostapd.add_ap(apdev[0]['ifname'], params)
+    dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="TLS",
+                   identity="tls user", ca_cert="auth_serv/ca.pem",
+                   private_key="auth_serv/user.pkcs12",
+                   private_key_passwd="whatever", ocsp=2,
+                   wait_connect=False, scan_freq="2412")
+    count = 0
+    while True:
+        ev = dev[0].wait_event(["CTRL-EVENT-EAP-STATUS"])
+        if ev is None:
+            raise Exception("Timeout on EAP status")
+        if 'bad certificate status response' in ev:
+            break
+        count = count + 1
+        if count > 10:
+            raise Exception("Unexpected number of EAP status messages")
+
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-FAILURE"])
+    if ev is None:
+        raise Exception("Timeout on EAP failure report")
+
 def test_ap_wpa2_eap_ttls_ocsp_revoked(dev, apdev, params):
     """WPA2-Enterprise connection using EAP-TTLS and OCSP status revoked"""
+    check_ocsp_support(dev[0])
     ocsp = os.path.join(params['logdir'], "ocsp-server-cache-revoked.der")
     if not os.path.exists(ocsp):
         raise HwsimSkip("No OCSP response available")
@@ -2215,6 +2615,7 @@ def test_ap_wpa2_eap_ttls_ocsp_revoked(dev, apdev, params):
 
 def test_ap_wpa2_eap_ttls_ocsp_unknown(dev, apdev, params):
     """WPA2-Enterprise connection using EAP-TTLS and OCSP status revoked"""
+    check_ocsp_support(dev[0])
     ocsp = os.path.join(params['logdir'], "ocsp-server-cache-unknown.der")
     if not os.path.exists(ocsp):
         raise HwsimSkip("No OCSP response available")
@@ -2350,6 +2751,7 @@ def test_ap_wpa2_eap_tls_domain_mismatch_cn(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_expired_cert(dev, apdev):
     """WPA2-Enterprise using EAP-TTLS and expired certificate"""
+    skip_with_fips(dev[0])
     params = int_eap_server_params()
     params["server_cert"] = "auth_serv/server-expired.pem"
     params["private_key"] = "auth_serv/server-expired.key"
@@ -2370,6 +2772,7 @@ def test_ap_wpa2_eap_ttls_expired_cert(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_ignore_expired_cert(dev, apdev):
     """WPA2-Enterprise using EAP-TTLS and ignore certificate expiration"""
+    skip_with_fips(dev[0])
     params = int_eap_server_params()
     params["server_cert"] = "auth_serv/server-expired.pem"
     params["private_key"] = "auth_serv/server-expired.key"
@@ -2380,8 +2783,21 @@ def test_ap_wpa2_eap_ttls_ignore_expired_cert(dev, apdev):
                    phase1="tls_disable_time_checks=1",
                    scan_freq="2412")
 
+def test_ap_wpa2_eap_ttls_long_duration(dev, apdev):
+    """WPA2-Enterprise using EAP-TTLS and long certificate duration"""
+    skip_with_fips(dev[0])
+    params = int_eap_server_params()
+    params["server_cert"] = "auth_serv/server-long-duration.pem"
+    params["private_key"] = "auth_serv/server-long-duration.key"
+    hostapd.add_ap(apdev[0]['ifname'], params)
+    dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="TTLS",
+                   identity="mschap user", password="password",
+                   ca_cert="auth_serv/ca.pem", phase2="auth=MSCHAP",
+                   scan_freq="2412")
+
 def test_ap_wpa2_eap_ttls_server_cert_eku_client(dev, apdev):
     """WPA2-Enterprise using EAP-TTLS and server cert with client EKU"""
+    skip_with_fips(dev[0])
     params = int_eap_server_params()
     params["server_cert"] = "auth_serv/server-eku-client.pem"
     params["private_key"] = "auth_serv/server-eku-client.key"
@@ -2397,6 +2813,7 @@ def test_ap_wpa2_eap_ttls_server_cert_eku_client(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_server_cert_eku_client_server(dev, apdev):
     """WPA2-Enterprise using EAP-TTLS and server cert with client and server EKU"""
+    skip_with_fips(dev[0])
     params = int_eap_server_params()
     params["server_cert"] = "auth_serv/server-eku-client-server.pem"
     params["private_key"] = "auth_serv/server-eku-client-server.key"
@@ -2408,6 +2825,7 @@ def test_ap_wpa2_eap_ttls_server_cert_eku_client_server(dev, apdev):
 
 def test_ap_wpa2_eap_ttls_server_pkcs12(dev, apdev):
     """WPA2-Enterprise using EAP-TTLS and server PKCS#12 file"""
+    skip_with_fips(dev[0])
     params = int_eap_server_params()
     del params["server_cert"]
     params["private_key"] = "auth_serv/server.pkcs12"
@@ -2421,22 +2839,97 @@ def test_ap_wpa2_eap_ttls_dh_params(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/CHAP and setting DH params"""
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hostapd.add_ap(apdev[0]['ifname'], params)
-    eap_connect(dev[0], apdev[0], "TTLS", "chap user",
+    eap_connect(dev[0], apdev[0], "TTLS", "pap user",
                 anonymous_identity="ttls", password="password",
-                ca_cert="auth_serv/ca.der", phase2="auth=CHAP",
+                ca_cert="auth_serv/ca.der", phase2="auth=PAP",
                 dh_file="auth_serv/dh.conf")
+
+def test_ap_wpa2_eap_ttls_dh_params_dsa(dev, apdev):
+    """WPA2-Enterprise connection using EAP-TTLS and setting DH params (DSA)"""
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    hostapd.add_ap(apdev[0]['ifname'], params)
+    eap_connect(dev[0], apdev[0], "TTLS", "pap user",
+                anonymous_identity="ttls", password="password",
+                ca_cert="auth_serv/ca.der", phase2="auth=PAP",
+                dh_file="auth_serv/dsaparam.pem")
+
+def test_ap_wpa2_eap_ttls_dh_params_not_found(dev, apdev):
+    """EAP-TTLS and DH params file not found"""
+    skip_with_fips(dev[0])
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    hostapd.add_ap(apdev[0]['ifname'], params)
+    dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="TTLS",
+                   identity="mschap user", password="password",
+                   ca_cert="auth_serv/ca.pem", phase2="auth=MSCHAP",
+                   dh_file="auth_serv/dh-no-such-file.conf",
+                   scan_freq="2412", wait_connect=False)
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-FAILURE"])
+    if ev is None:
+        raise Exception("EAP failure timed out")
+    dev[0].request("REMOVE_NETWORK all")
+    dev[0].wait_disconnected()
+
+def test_ap_wpa2_eap_ttls_dh_params_invalid(dev, apdev):
+    """EAP-TTLS and invalid DH params file"""
+    skip_with_fips(dev[0])
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    hostapd.add_ap(apdev[0]['ifname'], params)
+    dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="TTLS",
+                   identity="mschap user", password="password",
+                   ca_cert="auth_serv/ca.pem", phase2="auth=MSCHAP",
+                   dh_file="auth_serv/ca.pem",
+                   scan_freq="2412", wait_connect=False)
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-FAILURE"])
+    if ev is None:
+        raise Exception("EAP failure timed out")
+    dev[0].request("REMOVE_NETWORK all")
+    dev[0].wait_disconnected()
 
 def test_ap_wpa2_eap_ttls_dh_params_blob(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS/CHAP and setting DH params from blob"""
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hostapd.add_ap(apdev[0]['ifname'], params)
-    dh = read_pem("auth_serv/dh.conf")
+    dh = read_pem("auth_serv/dh2.conf")
     if "OK" not in dev[0].request("SET blob dhparams " + dh.encode("hex")):
         raise Exception("Could not set dhparams blob")
-    eap_connect(dev[0], apdev[0], "TTLS", "chap user",
+    eap_connect(dev[0], apdev[0], "TTLS", "pap user",
                 anonymous_identity="ttls", password="password",
-                ca_cert="auth_serv/ca.der", phase2="auth=CHAP",
+                ca_cert="auth_serv/ca.der", phase2="auth=PAP",
                 dh_file="blob://dhparams")
+
+def test_ap_wpa2_eap_ttls_dh_params_server(dev, apdev):
+    """WPA2-Enterprise using EAP-TTLS and alternative server dhparams"""
+    params = int_eap_server_params()
+    params["dh_file"] = "auth_serv/dh2.conf"
+    hostapd.add_ap(apdev[0]['ifname'], params)
+    eap_connect(dev[0], apdev[0], "TTLS", "pap user",
+                anonymous_identity="ttls", password="password",
+                ca_cert="auth_serv/ca.der", phase2="auth=PAP")
+
+def test_ap_wpa2_eap_ttls_dh_params_dsa_server(dev, apdev):
+    """WPA2-Enterprise using EAP-TTLS and alternative server dhparams (DSA)"""
+    params = int_eap_server_params()
+    params["dh_file"] = "auth_serv/dsaparam.pem"
+    hostapd.add_ap(apdev[0]['ifname'], params)
+    eap_connect(dev[0], apdev[0], "TTLS", "pap user",
+                anonymous_identity="ttls", password="password",
+                ca_cert="auth_serv/ca.der", phase2="auth=PAP")
+
+def test_ap_wpa2_eap_ttls_dh_params_not_found(dev, apdev):
+    """EAP-TLS server and dhparams file not found"""
+    params = int_eap_server_params()
+    params["dh_file"] = "auth_serv/dh-no-such-file.conf"
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params, no_enable=True)
+    if "FAIL" not in hapd.request("ENABLE"):
+        raise Exception("Invalid configuration accepted")
+
+def test_ap_wpa2_eap_ttls_dh_params_invalid(dev, apdev):
+    """EAP-TLS server and invalid dhparams file"""
+    params = int_eap_server_params()
+    params["dh_file"] = "auth_serv/ca.pem"
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params, no_enable=True)
+    if "FAIL" not in hapd.request("ENABLE"):
+        raise Exception("Invalid configuration accepted")
 
 def test_ap_wpa2_eap_reauth(dev, apdev):
     """WPA2-Enterprise and Authenticator forcing reauthentication"""
@@ -2505,6 +2998,7 @@ def test_ap_wpa2_eap_sim_aka_result_ind(dev, apdev):
 
 def test_ap_wpa2_eap_too_many_roundtrips(dev, apdev):
     """WPA2-Enterprise connection resulting in too many EAP roundtrips"""
+    skip_with_fips(dev[0])
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hostapd.add_ap(apdev[0]['ifname'], params)
     dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP WPA-EAP-SHA256",
@@ -2543,6 +3037,7 @@ def test_ap_wpa2_eap_expanded_nak(dev, apdev):
 
 def test_ap_wpa2_eap_sql(dev, apdev, params):
     """WPA2-Enterprise connection using SQLite for user DB"""
+    skip_with_fips(dev[0])
     try:
         import sqlite3
     except ImportError:
@@ -2632,7 +3127,17 @@ def test_openssl_cipher_suite_config_wpas(dev, apdev):
                 anonymous_identity="ttls", password="password",
                 openssl_ciphers="EXPORT",
                 ca_cert="auth_serv/ca.pem", phase2="auth=PAP",
-                expect_failure=True)
+                expect_failure=True, maybe_local_error=True)
+    dev[2].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="TTLS",
+                   identity="pap user", anonymous_identity="ttls",
+                   password="password",
+                   openssl_ciphers="FOO",
+                   ca_cert="auth_serv/ca.pem", phase2="auth=PAP",
+                   wait_connect=False)
+    ev = dev[2].wait_event(["CTRL-EVENT-EAP-FAILURE"], timeout=10)
+    if ev is None:
+        raise Exception("EAP failure after invalid openssl_ciphers not reported")
+    dev[2].request("DISCONNECT")
 
 def test_openssl_cipher_suite_config_hapd(dev, apdev):
     """OpenSSL cipher suite configuration on hostapd"""
@@ -2657,6 +3162,11 @@ def test_openssl_cipher_suite_config_hapd(dev, apdev):
                 anonymous_identity="ttls", password="password",
                 openssl_ciphers="HIGH:!ADH",
                 ca_cert="auth_serv/ca.pem", phase2="auth=PAP")
+
+    params['openssl_ciphers'] = "FOO"
+    hapd2 = hostapd.add_ap(apdev[1]['ifname'], params, no_enable=True)
+    if "FAIL" not in hapd2.request("ENABLE"):
+        raise Exception("Invalid openssl_ciphers value accepted")
 
 def test_wpa2_eap_ttls_pap_key_lifetime_in_memory(dev, apdev, params):
     """Key lifetime in memory with WPA2-Enterprise using EAP-TTLS/PAP"""
@@ -2818,3 +3328,506 @@ def _test_ap_wpa2_eap_in_bridge(dev, apdev):
     wpas.wait_disconnected()
     wpas.request("RECONNECT")
     wpas.wait_connected()
+
+def test_ap_wpa2_eap_session_ticket(dev, apdev):
+    """WPA2-Enterprise connection using EAP-TTLS and TLS session ticket enabled"""
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    key_mgmt = hapd.get_config()['key_mgmt']
+    if key_mgmt.split(' ')[0] != "WPA-EAP":
+        raise Exception("Unexpected GET_CONFIG(key_mgmt): " + key_mgmt)
+    eap_connect(dev[0], apdev[0], "TTLS", "pap user",
+                anonymous_identity="ttls", password="password",
+                ca_cert="auth_serv/ca.pem",
+                phase1="tls_disable_session_ticket=0", phase2="auth=PAP")
+    eap_reauth(dev[0], "TTLS")
+
+def test_ap_wpa2_eap_no_workaround(dev, apdev):
+    """WPA2-Enterprise connection using EAP-TTLS and eap_workaround=0"""
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    key_mgmt = hapd.get_config()['key_mgmt']
+    if key_mgmt.split(' ')[0] != "WPA-EAP":
+        raise Exception("Unexpected GET_CONFIG(key_mgmt): " + key_mgmt)
+    eap_connect(dev[0], apdev[0], "TTLS", "pap user",
+                anonymous_identity="ttls", password="password",
+                ca_cert="auth_serv/ca.pem", eap_workaround='0',
+                phase2="auth=PAP")
+    eap_reauth(dev[0], "TTLS")
+
+def test_ap_wpa2_eap_tls_check_crl(dev, apdev):
+    """EAP-TLS and server checking CRL"""
+    params = int_eap_server_params()
+    params['check_crl'] = '1'
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+
+    # check_crl=1 and no CRL available --> reject connection
+    eap_connect(dev[0], apdev[0], "TLS", "tls user", ca_cert="auth_serv/ca.pem",
+                client_cert="auth_serv/user.pem",
+                private_key="auth_serv/user.key", expect_failure=True)
+    dev[0].request("REMOVE_NETWORK all")
+
+    hapd.disable()
+    hapd.set("ca_cert", "auth_serv/ca-and-crl.pem")
+    hapd.enable()
+
+    # check_crl=1 and valid CRL --> accept
+    eap_connect(dev[0], apdev[0], "TLS", "tls user", ca_cert="auth_serv/ca.pem",
+                client_cert="auth_serv/user.pem",
+                private_key="auth_serv/user.key")
+    dev[0].request("REMOVE_NETWORK all")
+
+    hapd.disable()
+    hapd.set("check_crl", "2")
+    hapd.enable()
+
+    # check_crl=2 and valid CRL --> accept
+    eap_connect(dev[0], apdev[0], "TLS", "tls user", ca_cert="auth_serv/ca.pem",
+                client_cert="auth_serv/user.pem",
+                private_key="auth_serv/user.key")
+    dev[0].request("REMOVE_NETWORK all")
+
+def test_ap_wpa2_eap_tls_oom(dev, apdev):
+    """EAP-TLS and OOM"""
+    check_subject_match_support(dev[0])
+    check_altsubject_match_support(dev[0])
+    check_domain_match_full(dev[0])
+
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    hostapd.add_ap(apdev[0]['ifname'], params)
+
+    tests = [ (1, "tls_connection_set_subject_match"),
+              (2, "tls_connection_set_subject_match"),
+              (3, "tls_connection_set_subject_match"),
+              (4, "tls_connection_set_subject_match") ]
+    for count, func in tests:
+        with alloc_fail(dev[0], count, func):
+            dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="TLS",
+                           identity="tls user", ca_cert="auth_serv/ca.pem",
+                           client_cert="auth_serv/user.pem",
+                           private_key="auth_serv/user.key",
+                           subject_match="/C=FI/O=w1.fi/CN=server.w1.fi",
+                           altsubject_match="EMAIL:noone@example.com;DNS:server.w1.fi;URI:http://example.com/",
+                           domain_suffix_match="server.w1.fi",
+                           domain_match="server.w1.fi",
+                           wait_connect=False, scan_freq="2412")
+            # TLS parameter configuration error results in CTRL-REQ-PASSPHRASE
+            ev = dev[0].wait_event(["CTRL-REQ-PASSPHRASE"], timeout=5)
+            if ev is None:
+                raise Exception("No passphrase request")
+            dev[0].request("REMOVE_NETWORK all")
+            dev[0].wait_disconnected()
+
+def test_ap_wpa2_eap_tls_macacl(dev, apdev):
+    """WPA2-Enterprise connection using MAC ACL"""
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    params["macaddr_acl"] = "2"
+    hostapd.add_ap(apdev[0]['ifname'], params)
+    eap_connect(dev[1], apdev[0], "TLS", "tls user", ca_cert="auth_serv/ca.pem",
+                client_cert="auth_serv/user.pem",
+                private_key="auth_serv/user.key")
+
+def test_ap_wpa2_eap_oom(dev, apdev):
+    """EAP server and OOM"""
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    dev[0].scan_for_bss(apdev[0]['bssid'], freq=2412)
+
+    with alloc_fail(hapd, 1, "eapol_auth_alloc"):
+        # The first attempt fails, but STA will send EAPOL-Start to retry and
+        # that succeeds.
+        dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="TLS",
+                       identity="tls user", ca_cert="auth_serv/ca.pem",
+                       client_cert="auth_serv/user.pem",
+                       private_key="auth_serv/user.key",
+                       scan_freq="2412")
+
+def check_tls_ver(dev, ap, phase1, expected):
+    eap_connect(dev, ap, "TLS", "tls user", ca_cert="auth_serv/ca.pem",
+                client_cert="auth_serv/user.pem",
+                private_key="auth_serv/user.key",
+                phase1=phase1)
+    ver = dev.get_status_field("eap_tls_version")
+    if ver != expected:
+        raise Exception("Unexpected TLS version (expected %s): %s" % (expected, ver))
+
+def test_ap_wpa2_eap_tls_versions(dev, apdev):
+    """EAP-TLS and TLS version configuration"""
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    hostapd.add_ap(apdev[0]['ifname'], params)
+
+    tls = dev[0].request("GET tls_library")
+    if tls.startswith("OpenSSL"):
+        if "build=OpenSSL 1.0.2" in tls and "run=OpenSSL 1.0.2" in tls:
+            check_tls_ver(dev[0], apdev[0],
+                          "tls_disable_tlsv1_0=1 tls_disable_tlsv1_1=1",
+                          "TLSv1.2")
+    check_tls_ver(dev[1], apdev[0],
+                  "tls_disable_tlsv1_0=1 tls_disable_tlsv1_2=1", "TLSv1.1")
+    check_tls_ver(dev[2], apdev[0],
+                  "tls_disable_tlsv1_1=1 tls_disable_tlsv1_2=1", "TLSv1")
+
+def test_rsn_ie_proto_eap_sta(dev, apdev):
+    """RSN element protocol testing for EAP cases on STA side"""
+    bssid = apdev[0]['bssid']
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    # This is the RSN element used normally by hostapd
+    params['own_ie_override'] = '30140100000fac040100000fac040100000fac010c00'
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    id = dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="GPSK",
+                        identity="gpsk user",
+                        password="abcdefghijklmnop0123456789abcdef",
+                        scan_freq="2412")
+
+    tests = [ ('No RSN Capabilities field',
+               '30120100000fac040100000fac040100000fac01'),
+              ('No AKM Suite fields',
+               '300c0100000fac040100000fac04'),
+              ('No Pairwise Cipher Suite fields',
+               '30060100000fac04'),
+              ('No Group Data Cipher Suite field',
+               '30020100') ]
+    for txt,ie in tests:
+        dev[0].request("DISCONNECT")
+        dev[0].wait_disconnected()
+        logger.info(txt)
+        hapd.disable()
+        hapd.set('own_ie_override', ie)
+        hapd.enable()
+        dev[0].request("BSS_FLUSH 0")
+        dev[0].scan_for_bss(bssid, 2412, force_scan=True, only_new=True)
+        dev[0].select_network(id, freq=2412)
+        dev[0].wait_connected()
+
+def check_tls_session_resumption_capa(dev, hapd):
+    tls = hapd.request("GET tls_library")
+    if not tls.startswith("OpenSSL"):
+        raise HwsimSkip("hostapd TLS library is not OpenSSL: " + tls)
+
+    tls = dev.request("GET tls_library")
+    if not tls.startswith("OpenSSL"):
+        raise HwsimSkip("Session resumption not supported with this TLS library: " + tls)
+
+def test_eap_ttls_pap_session_resumption(dev, apdev):
+    """EAP-TTLS/PAP session resumption"""
+    params = int_eap_server_params()
+    params['tls_session_lifetime'] = '60'
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    check_tls_session_resumption_capa(dev[0], hapd)
+    eap_connect(dev[0], apdev[0], "TTLS", "pap user",
+                anonymous_identity="ttls", password="password",
+                ca_cert="auth_serv/ca.pem", eap_workaround='0',
+                phase2="auth=PAP")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the first connection")
+
+    dev[0].request("REAUTHENTICATE")
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-SUCCESS"], timeout=10)
+    if ev is None:
+        raise Exception("EAP success timed out")
+    ev = dev[0].wait_event(["WPA: Key negotiation completed"], timeout=10)
+    if ev is None:
+        raise Exception("Key handshake with the AP timed out")
+    if dev[0].get_status_field("tls_session_reused") != '1':
+        raise Exception("Session resumption not used on the second connection")
+
+def test_eap_ttls_chap_session_resumption(dev, apdev):
+    """EAP-TTLS/CHAP session resumption"""
+    params = int_eap_server_params()
+    params['tls_session_lifetime'] = '60'
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    check_tls_session_resumption_capa(dev[0], hapd)
+    eap_connect(dev[0], apdev[0], "TTLS", "chap user",
+                anonymous_identity="ttls", password="password",
+                ca_cert="auth_serv/ca.der", phase2="auth=CHAP")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the first connection")
+
+    dev[0].request("REAUTHENTICATE")
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-SUCCESS"], timeout=10)
+    if ev is None:
+        raise Exception("EAP success timed out")
+    ev = dev[0].wait_event(["WPA: Key negotiation completed"], timeout=10)
+    if ev is None:
+        raise Exception("Key handshake with the AP timed out")
+    if dev[0].get_status_field("tls_session_reused") != '1':
+        raise Exception("Session resumption not used on the second connection")
+
+def test_eap_ttls_mschap_session_resumption(dev, apdev):
+    """EAP-TTLS/MSCHAP session resumption"""
+    params = int_eap_server_params()
+    params['tls_session_lifetime'] = '60'
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    check_tls_session_resumption_capa(dev[0], hapd)
+    eap_connect(dev[0], apdev[0], "TTLS", "mschap user",
+                anonymous_identity="ttls", password="password",
+                ca_cert="auth_serv/ca.pem", phase2="auth=MSCHAP",
+                domain_suffix_match="server.w1.fi")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the first connection")
+
+    dev[0].request("REAUTHENTICATE")
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-SUCCESS"], timeout=10)
+    if ev is None:
+        raise Exception("EAP success timed out")
+    ev = dev[0].wait_event(["WPA: Key negotiation completed"], timeout=10)
+    if ev is None:
+        raise Exception("Key handshake with the AP timed out")
+    if dev[0].get_status_field("tls_session_reused") != '1':
+        raise Exception("Session resumption not used on the second connection")
+
+def test_eap_ttls_mschapv2_session_resumption(dev, apdev):
+    """EAP-TTLS/MSCHAPv2 session resumption"""
+    check_eap_capa(dev[0], "MSCHAPV2")
+    params = int_eap_server_params()
+    params['tls_session_lifetime'] = '60'
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    check_tls_session_resumption_capa(dev[0], hapd)
+    eap_connect(dev[0], apdev[0], "TTLS", "DOMAIN\mschapv2 user",
+                anonymous_identity="ttls", password="password",
+                ca_cert="auth_serv/ca.pem", phase2="auth=MSCHAPV2",
+                domain_suffix_match="server.w1.fi")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the first connection")
+
+    dev[0].request("REAUTHENTICATE")
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-SUCCESS"], timeout=10)
+    if ev is None:
+        raise Exception("EAP success timed out")
+    ev = dev[0].wait_event(["WPA: Key negotiation completed"], timeout=10)
+    if ev is None:
+        raise Exception("Key handshake with the AP timed out")
+    if dev[0].get_status_field("tls_session_reused") != '1':
+        raise Exception("Session resumption not used on the second connection")
+
+def test_eap_ttls_eap_gtc_session_resumption(dev, apdev):
+    """EAP-TTLS/EAP-GTC session resumption"""
+    params = int_eap_server_params()
+    params['tls_session_lifetime'] = '60'
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    check_tls_session_resumption_capa(dev[0], hapd)
+    eap_connect(dev[0], apdev[0], "TTLS", "user",
+                anonymous_identity="ttls", password="password",
+                ca_cert="auth_serv/ca.pem", phase2="autheap=GTC")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the first connection")
+
+    dev[0].request("REAUTHENTICATE")
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-SUCCESS"], timeout=10)
+    if ev is None:
+        raise Exception("EAP success timed out")
+    ev = dev[0].wait_event(["WPA: Key negotiation completed"], timeout=10)
+    if ev is None:
+        raise Exception("Key handshake with the AP timed out")
+    if dev[0].get_status_field("tls_session_reused") != '1':
+        raise Exception("Session resumption not used on the second connection")
+
+def test_eap_ttls_no_session_resumption(dev, apdev):
+    """EAP-TTLS session resumption disabled on server"""
+    params = int_eap_server_params()
+    params['tls_session_lifetime'] = '0'
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    eap_connect(dev[0], apdev[0], "TTLS", "pap user",
+                anonymous_identity="ttls", password="password",
+                ca_cert="auth_serv/ca.pem", eap_workaround='0',
+                phase2="auth=PAP")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the first connection")
+
+    dev[0].request("REAUTHENTICATE")
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-SUCCESS"], timeout=10)
+    if ev is None:
+        raise Exception("EAP success timed out")
+    ev = dev[0].wait_event(["WPA: Key negotiation completed"], timeout=10)
+    if ev is None:
+        raise Exception("Key handshake with the AP timed out")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the second connection")
+
+def test_eap_peap_session_resumption(dev, apdev):
+    """EAP-PEAP session resumption"""
+    params = int_eap_server_params()
+    params['tls_session_lifetime'] = '60'
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    check_tls_session_resumption_capa(dev[0], hapd)
+    eap_connect(dev[0], apdev[0], "PEAP", "user",
+                anonymous_identity="peap", password="password",
+                ca_cert="auth_serv/ca.pem", phase2="auth=MSCHAPV2")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the first connection")
+
+    dev[0].request("REAUTHENTICATE")
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-SUCCESS"], timeout=10)
+    if ev is None:
+        raise Exception("EAP success timed out")
+    ev = dev[0].wait_event(["WPA: Key negotiation completed"], timeout=10)
+    if ev is None:
+        raise Exception("Key handshake with the AP timed out")
+    if dev[0].get_status_field("tls_session_reused") != '1':
+        raise Exception("Session resumption not used on the second connection")
+
+def test_eap_peap_no_session_resumption(dev, apdev):
+    """EAP-PEAP session resumption disabled on server"""
+    params = int_eap_server_params()
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    eap_connect(dev[0], apdev[0], "PEAP", "user",
+                anonymous_identity="peap", password="password",
+                ca_cert="auth_serv/ca.pem", phase2="auth=MSCHAPV2")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the first connection")
+
+    dev[0].request("REAUTHENTICATE")
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-SUCCESS"], timeout=10)
+    if ev is None:
+        raise Exception("EAP success timed out")
+    ev = dev[0].wait_event(["WPA: Key negotiation completed"], timeout=10)
+    if ev is None:
+        raise Exception("Key handshake with the AP timed out")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the second connection")
+
+def test_eap_tls_session_resumption(dev, apdev):
+    """EAP-TLS session resumption"""
+    params = int_eap_server_params()
+    params['tls_session_lifetime'] = '60'
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    check_tls_session_resumption_capa(dev[0], hapd)
+    eap_connect(dev[0], apdev[0], "TLS", "tls user", ca_cert="auth_serv/ca.pem",
+                client_cert="auth_serv/user.pem",
+                private_key="auth_serv/user.key")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the first connection")
+
+    dev[0].request("REAUTHENTICATE")
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-SUCCESS"], timeout=10)
+    if ev is None:
+        raise Exception("EAP success timed out")
+    ev = dev[0].wait_event(["WPA: Key negotiation completed"], timeout=10)
+    if ev is None:
+        raise Exception("Key handshake with the AP timed out")
+    if dev[0].get_status_field("tls_session_reused") != '1':
+        raise Exception("Session resumption not used on the second connection")
+
+    dev[0].request("REAUTHENTICATE")
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-SUCCESS"], timeout=10)
+    if ev is None:
+        raise Exception("EAP success timed out")
+    ev = dev[0].wait_event(["WPA: Key negotiation completed"], timeout=10)
+    if ev is None:
+        raise Exception("Key handshake with the AP timed out")
+    if dev[0].get_status_field("tls_session_reused") != '1':
+        raise Exception("Session resumption not used on the third connection")
+
+def test_eap_tls_session_resumption_expiration(dev, apdev):
+    """EAP-TLS session resumption"""
+    params = int_eap_server_params()
+    params['tls_session_lifetime'] = '1'
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    check_tls_session_resumption_capa(dev[0], hapd)
+    eap_connect(dev[0], apdev[0], "TLS", "tls user", ca_cert="auth_serv/ca.pem",
+                client_cert="auth_serv/user.pem",
+                private_key="auth_serv/user.key")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the first connection")
+
+    # Allow multiple attempts since OpenSSL may not expire the cached entry
+    # immediately.
+    for i in range(10):
+        time.sleep(1.2)
+
+        dev[0].request("REAUTHENTICATE")
+        ev = dev[0].wait_event(["CTRL-EVENT-EAP-SUCCESS"], timeout=10)
+        if ev is None:
+            raise Exception("EAP success timed out")
+        ev = dev[0].wait_event(["WPA: Key negotiation completed"], timeout=10)
+        if ev is None:
+            raise Exception("Key handshake with the AP timed out")
+        if dev[0].get_status_field("tls_session_reused") == '0':
+            break
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Session resumption used after lifetime expiration")
+
+def test_eap_tls_no_session_resumption(dev, apdev):
+    """EAP-TLS session resumption disabled on server"""
+    params = int_eap_server_params()
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    eap_connect(dev[0], apdev[0], "TLS", "tls user", ca_cert="auth_serv/ca.pem",
+                client_cert="auth_serv/user.pem",
+                private_key="auth_serv/user.key")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the first connection")
+
+    dev[0].request("REAUTHENTICATE")
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-SUCCESS"], timeout=10)
+    if ev is None:
+        raise Exception("EAP success timed out")
+    ev = dev[0].wait_event(["WPA: Key negotiation completed"], timeout=10)
+    if ev is None:
+        raise Exception("Key handshake with the AP timed out")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the second connection")
+
+def test_eap_tls_session_resumption_radius(dev, apdev):
+    """EAP-TLS session resumption (RADIUS)"""
+    params = { "ssid": "as", "beacon_int": "2000",
+               "radius_server_clients": "auth_serv/radius_clients.conf",
+               "radius_server_auth_port": '18128',
+               "eap_server": "1",
+               "eap_user_file": "auth_serv/eap_user.conf",
+               "ca_cert": "auth_serv/ca.pem",
+               "server_cert": "auth_serv/server.pem",
+               "private_key": "auth_serv/server.key",
+               "tls_session_lifetime": "60" }
+    authsrv = hostapd.add_ap(apdev[1]['ifname'], params)
+    check_tls_session_resumption_capa(dev[0], authsrv)
+
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    params['auth_server_port'] = "18128"
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    eap_connect(dev[0], apdev[0], "TLS", "tls user", ca_cert="auth_serv/ca.pem",
+                client_cert="auth_serv/user.pem",
+                private_key="auth_serv/user.key")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the first connection")
+
+    dev[0].request("REAUTHENTICATE")
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-SUCCESS"], timeout=10)
+    if ev is None:
+        raise Exception("EAP success timed out")
+    ev = dev[0].wait_event(["WPA: Key negotiation completed"], timeout=10)
+    if ev is None:
+        raise Exception("Key handshake with the AP timed out")
+    if dev[0].get_status_field("tls_session_reused") != '1':
+        raise Exception("Session resumption not used on the second connection")
+
+def test_eap_tls_no_session_resumption_radius(dev, apdev):
+    """EAP-TLS session resumption disabled (RADIUS)"""
+    params = { "ssid": "as", "beacon_int": "2000",
+               "radius_server_clients": "auth_serv/radius_clients.conf",
+               "radius_server_auth_port": '18128',
+               "eap_server": "1",
+               "eap_user_file": "auth_serv/eap_user.conf",
+               "ca_cert": "auth_serv/ca.pem",
+               "server_cert": "auth_serv/server.pem",
+               "private_key": "auth_serv/server.key",
+               "tls_session_lifetime": "0" }
+    hostapd.add_ap(apdev[1]['ifname'], params)
+
+    params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
+    params['auth_server_port'] = "18128"
+    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    eap_connect(dev[0], apdev[0], "TLS", "tls user", ca_cert="auth_serv/ca.pem",
+                client_cert="auth_serv/user.pem",
+                private_key="auth_serv/user.key")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the first connection")
+
+    dev[0].request("REAUTHENTICATE")
+    ev = dev[0].wait_event(["CTRL-EVENT-EAP-SUCCESS"], timeout=10)
+    if ev is None:
+        raise Exception("EAP success timed out")
+    ev = dev[0].wait_event(["WPA: Key negotiation completed"], timeout=10)
+    if ev is None:
+        raise Exception("Key handshake with the AP timed out")
+    if dev[0].get_status_field("tls_session_reused") != '0':
+        raise Exception("Unexpected session resumption on the second connection")

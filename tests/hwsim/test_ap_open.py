@@ -60,6 +60,18 @@ def test_ap_open_unknown_action(dev, apdev):
     if "result=SUCCESS" not in ev:
         raise Exception("AP did not ack Action frame")
 
+def test_ap_open_invalid_wmm_action(dev, apdev):
+    """AP with open mode configuration and invalid WMM Action frame"""
+    hapd = hostapd.add_ap(apdev[0]['ifname'], { "ssid": "open" })
+    dev[0].connect("open", key_mgmt="NONE", scan_freq="2412")
+    bssid = apdev[0]['bssid']
+    cmd = "MGMT_TX {} {} freq=2412 action=1100".format(bssid, bssid)
+    if "FAIL" in dev[0].request(cmd):
+        raise Exception("Could not send test Action frame")
+    ev = dev[0].wait_event(["MGMT-TX-STATUS"], timeout=10)
+    if ev is None or "result=SUCCESS" not in ev:
+        raise Exception("AP did not ack Action frame")
+
 def test_ap_open_reconnect_on_inactivity_disconnect(dev, apdev):
     """Reconnect to open mode AP after inactivity related disconnection"""
     hapd = hostapd.add_ap(apdev[0]['ifname'], { "ssid": "open" })
@@ -127,8 +139,11 @@ def test_ap_open_select_any(dev, apdev):
     dev[0].connect("open", key_mgmt="NONE", scan_freq="2412",
                    only_add_network=True)
     dev[0].select_network(id)
-    ev = dev[0].wait_event(["CTRL-EVENT-CONNECTED"], timeout=1)
-    if ev is not None:
+    ev = dev[0].wait_event(["CTRL-EVENT-NETWORK-NOT-FOUND",
+                            "CTRL-EVENT-CONNECTED"], timeout=10)
+    if ev is None:
+        raise Exception("No result reported")
+    if "CTRL-EVENT-CONNECTED" in ev:
         raise Exception("Unexpected connection")
 
     dev[0].select_network("any")
@@ -416,3 +431,54 @@ def test_ap_open_select_network(dev, apdev):
     res = dev[0].request("BLACKLIST")
     if bssid1 in res or bssid2 in res:
         raise Exception("Unexpected blacklist entry(2)")
+
+def test_ap_open_disable_enable(dev, apdev):
+    """AP with open mode getting disabled and re-enabled"""
+    hapd = hostapd.add_ap(apdev[0]['ifname'], { "ssid": "open" })
+    dev[0].connect("open", key_mgmt="NONE", scan_freq="2412",
+                   bg_scan_period="0")
+
+    for i in range(2):
+        hapd.request("DISABLE")
+        dev[0].wait_disconnected()
+        hapd.request("ENABLE")
+        dev[0].wait_connected()
+        hwsim_utils.test_connectivity(dev[0], hapd)
+
+def sta_enable_disable(dev, bssid):
+    dev.scan_for_bss(bssid, freq=2412)
+    work_id = dev.request("RADIO_WORK add block-work")
+    ev = dev.wait_event(["EXT-RADIO-WORK-START"])
+    if ev is None:
+        raise Exception("Timeout while waiting radio work to start")
+    id = dev.connect("open", key_mgmt="NONE", scan_freq="2412",
+                     only_add_network=True)
+    dev.request("ENABLE_NETWORK %d" % id)
+    if "connect@" not in dev.request("RADIO_WORK show"):
+        raise Exception("connect radio work missing")
+    dev.request("DISABLE_NETWORK %d" % id)
+    dev.request("RADIO_WORK done " + work_id)
+
+    ok = False
+    for i in range(30):
+        if "connect@" not in dev.request("RADIO_WORK show"):
+            ok = True
+            break
+        time.sleep(0.1)
+    if not ok:
+        raise Exception("connect radio work not completed")
+    ev = dev.wait_event(["CTRL-EVENT-CONNECTED"], timeout=0.1)
+    if ev is not None:
+        raise Exception("Unexpected connection")
+    dev.request("DISCONNECT")
+
+def test_ap_open_sta_enable_disable(dev, apdev):
+    """AP with open mode and wpa_supplicant ENABLE/DISABLE_NETWORK"""
+    hapd = hostapd.add_ap(apdev[0]['ifname'], { "ssid": "open" })
+    bssid = apdev[0]['bssid']
+
+    sta_enable_disable(dev[0], bssid)
+
+    wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+    wpas.interface_add("wlan5", drv_params="force_connect_cmd=1")
+    sta_enable_disable(wpas, bssid)

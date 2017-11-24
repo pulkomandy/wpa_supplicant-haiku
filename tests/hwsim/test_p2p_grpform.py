@@ -259,6 +259,21 @@ def test_grpform3_c(dev):
     if r_res['ifname'] in utils.get_ifnames():
         raise Exception("Group interface netdev was not removed")
 
+def test_grpform4(dev):
+    """P2P group formation response during p2p_find"""
+    addr1 = dev[1].p2p_dev_addr()
+    dev[1].p2p_listen()
+    dev[0].discover_peer(addr1)
+    dev[1].p2p_find(social=True)
+    time.sleep(0.4)
+    dev[0].global_request("P2P_CONNECT " + addr1 + " 12345670 display")
+    ev = dev[1].wait_global_event(["P2P-GO-NEG-REQUEST"], timeout=15)
+    if ev is None:
+        raise Exception("GO Negotiation RX timed out")
+    time.sleep(0.5)
+    dev[1].p2p_stop_find()
+    dev[0].p2p_stop_find()
+
 def test_grpform_pbc(dev):
     """P2P group formation using PBC and re-init GO Negotiation"""
     [i_res, r_res] = go_neg_pbc(i_dev=dev[0], i_intent=15, r_dev=dev[1], r_intent=0)
@@ -305,6 +320,63 @@ def test_grpform_ext_listen(dev):
             raise Exception("Failed to clear extended listen timing")
         if "OK" not in dev[1].global_request("P2P_EXT_LISTEN"):
             raise Exception("Failed to clear extended listen timing")
+
+def test_grpform_ext_listen_oper(dev):
+    """P2P extended listen timing operations"""
+    try:
+        _test_grpform_ext_listen_oper(dev)
+    finally:
+        dev[0].global_request("P2P_EXT_LISTEN")
+
+def _test_grpform_ext_listen_oper(dev):
+    addr0 = dev[0].p2p_dev_addr()
+    dev[0].global_request("SET p2p_no_group_iface 0")
+    wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+    wpas.interface_add("wlan5")
+    addr1 = wpas.p2p_dev_addr()
+    wpas.request("P2P_SET listen_channel 1")
+    wpas.global_request("SET p2p_no_group_iface 0")
+    wpas.request("P2P_LISTEN")
+    if not dev[0].discover_peer(addr1):
+        raise Exception("Could not discover peer")
+    dev[0].request("P2P_LISTEN")
+    if not wpas.discover_peer(addr0):
+        raise Exception("Could not discover peer (2)")
+
+    dev[0].global_request("P2P_EXT_LISTEN 300 500")
+    dev[0].global_request("P2P_CONNECT " + addr1 + " 12345670 display auth go_intent=0 freq=2417")
+    wpas.global_request("P2P_CONNECT " + addr0 + " 12345670 enter go_intent=15 freq=2417")
+    ev = dev[0].wait_global_event(["P2P-GO-NEG-SUCCESS"], timeout=15)
+    if ev is None:
+        raise Exception("GO Negotiation failed")
+    ifaces = wpas.request("INTERFACES").splitlines()
+    iface = ifaces[0] if "p2p-wlan" in ifaces[0] else ifaces[1]
+    wpas.group_ifname = iface
+    if "OK" not in wpas.group_request("STOP_AP"):
+        raise Exception("STOP_AP failed")
+    wpas.group_request("SET ext_mgmt_frame_handling 1")
+    dev[1].p2p_find(social=True)
+    time.sleep(1)
+    if dev[1].peer_known(addr0):
+        raise Exception("Unexpected peer discovery")
+    ifaces = dev[0].request("INTERFACES").splitlines()
+    iface = ifaces[0] if "p2p-wlan" in ifaces[0] else ifaces[1]
+    if "OK" not in dev[0].global_request("P2P_GROUP_REMOVE " + iface):
+        raise Exception("Failed to request group removal")
+    wpas.remove_group()
+
+    count = 0
+    timeout = 15
+    found = False
+    while count < timeout * 4:
+        time.sleep(0.25)
+        count = count + 1
+        if dev[1].peer_known(addr0):
+            found = True
+            break
+    dev[1].p2p_stop_find()
+    if not found:
+        raise Exception("Could not discover peer that was supposed to use extended listen")
 
 def test_both_go_intent_15(dev):
     """P2P GO Negotiation with both devices using GO intent 15"""
@@ -877,6 +949,8 @@ def test_grpform_wait_peer(dev):
     ev = dev[0].wait_global_event(["P2P-GROUP-STARTED"], timeout=15)
     if ev is None:
         raise Exception("Group formation timed out")
+    dev[0].group_form_result(ev)
+
     dev[0].request("SET extra_roc_dur 0")
     ev = dev[1].wait_global_event(["P2P-GROUP-STARTED"], timeout=15)
     if ev is None:
@@ -898,6 +972,8 @@ def test_invalid_p2p_connect_command(dev):
             raise Exception("Invalid P2P_CONNECT command accepted: " + cmd)
 
     if "FAIL-INVALID-PIN" not in dev[0].request("P2P_CONNECT 00:11:22:33:44:55 1234567"):
+        raise Exception("Invalid PIN was not rejected")
+    if "FAIL-INVALID-PIN" not in dev[0].request("P2P_CONNECT 00:11:22:33:44:55 12345678a"):
         raise Exception("Invalid PIN was not rejected")
 
     if "FAIL-CHANNEL-UNSUPPORTED" not in dev[0].request("P2P_CONNECT 00:11:22:33:44:55 pin freq=3000"):
